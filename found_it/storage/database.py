@@ -82,6 +82,13 @@ class Database:
         )
         self.conn.commit()
 
+    def rename_item(self, item_id: int, new_label: str):
+        self.conn.execute(
+            "UPDATE items SET label = ? WHERE id = ?",
+            (new_label, item_id)
+        )
+        self.conn.commit()
+
     def deactivate_old_items(self, seconds: int):
         cutoff = datetime.now().timestamp() - seconds
         self.conn.execute(

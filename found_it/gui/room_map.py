@@ -17,6 +17,7 @@ class RoomMap(QWidget):
         super().__init__(parent)
         self.setMinimumSize(300, 300)
         self.items: List[dict] = []
+        self.zones: List[dict] = []
         self.room_width = 4.0
         self.room_height = 4.0
         self.center_camera_enabled = False
@@ -26,6 +27,10 @@ class RoomMap(QWidget):
     def set_room_size(self, width: float, height: float):
         self.room_width = width
         self.room_height = height
+        self.update()
+
+    def set_zones(self, zones: List[dict]):
+        self.zones = zones
         self.update()
 
     def set_center_camera(self, enabled: bool):
@@ -79,6 +84,17 @@ class RoomMap(QWidget):
         for i in range(3):
             x = self._padding + int(draw_w * (i + 0.5) / 3)
             painter.drawText(x - 10, self._padding + draw_h + 15, f"{(i+1)/3:.1f}")
+
+        for zone in self.zones:
+            zx1, zy1 = self._room_to_pixel(zone["x1"], zone["y1"])
+            zx2, zy2 = self._room_to_pixel(zone["x2"], zone["y2"])
+            painter.setPen(QPen(QColor(108, 99, 255), 1, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(108, 99, 255, 30)))
+            painter.drawRect(zx1, zy1, zx2 - zx1, zy2 - zy1)
+            painter.setPen(QPen(QColor(180, 175, 255), 1))
+            font = QFont("Segoe UI", 7)
+            painter.setFont(font)
+            painter.drawText(zx1 + 4, zy1 + 12, zone.get("name", "Zone"))
 
         cam0_x, cam0_y = self._room_to_pixel(0.1, 0.1)
         cam1_x, cam1_y = self._room_to_pixel(self.room_width - 0.1, self.room_height - 0.1)

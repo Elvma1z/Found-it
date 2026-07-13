@@ -22,6 +22,7 @@ from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.file_search_panel import FileSearchPanel
 from found_it.gui.device_search_panel import DeviceSearchPanel
+from found_it.gui.room_setup_panel import RoomSetupPanel
 
 
 class MainWindow(QMainWindow):
@@ -78,6 +79,20 @@ class MainWindow(QMainWindow):
         self.mode_room_btn.clicked.connect(lambda: self._switch_mode("room"))
         nav_layout.addWidget(self.mode_room_btn)
 
+        self.mode_room_setup_btn = QPushButton("Room Setup")
+        self.mode_room_setup_btn.setCheckable(True)
+        self.mode_room_setup_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #888; border: none;
+                padding: 8px 20px; font-size: 13px; font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
+            QPushButton:hover { color: #ccc; }
+        """)
+        self.mode_room_setup_btn.clicked.connect(lambda: self._switch_mode("room_setup"))
+        nav_layout.addWidget(self.mode_room_setup_btn)
+
         self.mode_file_btn = QPushButton("File Search")
         self.mode_file_btn.setCheckable(True)
         self.mode_file_btn.setStyleSheet("""
@@ -115,13 +130,17 @@ class MainWindow(QMainWindow):
         self.content_layout.setSpacing(0)
 
         self.room_widget = self._build_room_view()
+        self.room_setup_panel = RoomSetupPanel()
+        self.room_setup_panel.room_updated.connect(self._on_room_updated)
         self.file_search_panel = FileSearchPanel()
         self.device_search_panel = DeviceSearchPanel()
 
         self.content_layout.addWidget(self.room_widget)
+        self.content_layout.addWidget(self.room_setup_panel)
         self.content_layout.addWidget(self.file_search_panel)
         self.content_layout.addWidget(self.device_search_panel)
 
+        self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
 
@@ -204,6 +223,7 @@ class MainWindow(QMainWindow):
 
         self.room_map = RoomMap()
         self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
+        self.room_map.set_zones(self.room_config.zones)
         self.room_map.set_center_camera(CENTER_CAMERA_ENABLED)
         center_layout.addWidget(self.room_map)
 
@@ -221,21 +241,32 @@ class MainWindow(QMainWindow):
 
     def _switch_mode(self, mode):
         self.room_widget.hide()
+        self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
         self.mode_room_btn.setChecked(False)
+        self.mode_room_setup_btn.setChecked(False)
         self.mode_file_btn.setChecked(False)
         self.mode_device_btn.setChecked(False)
 
         if mode == "room":
             self.room_widget.show()
             self.mode_room_btn.setChecked(True)
+        elif mode == "room_setup":
+            self.room_setup_panel.show()
+            self.mode_room_setup_btn.setChecked(True)
         elif mode == "file":
             self.file_search_panel.show()
             self.mode_file_btn.setChecked(True)
         elif mode == "device":
             self.device_search_panel.show()
             self.mode_device_btn.setChecked(True)
+
+    def _on_room_updated(self):
+        self.room_config = load_room_config()
+        self.mapper.room = self.room_config
+        self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
+        self.room_map.set_zones(self.room_config.zones)
 
     def _setup_timers(self):
         self._detect_timer = QTimer()
