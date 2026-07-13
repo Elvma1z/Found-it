@@ -1,9 +1,7 @@
-﻿from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QWidget
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush
 from typing import List, Tuple, Optional
-
-from found_it.config import CAMERA_LABELS, CENTER_CAMERA_ID
 
 
 class RoomMap(QWidget):
@@ -12,15 +10,19 @@ class RoomMap(QWidget):
         1: QColor(100, 100, 255),
         2: QColor(100, 255, 180),
     }
+    FALLBACK_COLORS = [
+        QColor(255, 180, 60), QColor(200, 100, 255), QColor(255, 100, 200),
+        QColor(120, 220, 255), QColor(180, 255, 100),
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(300, 300)
         self.items: List[dict] = []
         self.zones: List[dict] = []
+        self.cameras: List[dict] = []
         self.room_width = 4.0
         self.room_height = 4.0
-        self.center_camera_enabled = False
         self.selected_item_id: Optional[int] = None
         self._padding = 40
 
@@ -33,8 +35,8 @@ class RoomMap(QWidget):
         self.zones = zones
         self.update()
 
-    def set_center_camera(self, enabled: bool):
-        self.center_camera_enabled = enabled
+    def set_cameras(self, cameras: List[dict]):
+        self.cameras = cameras
         self.update()
 
     def update_items(self, items: List[dict]):
@@ -44,6 +46,11 @@ class RoomMap(QWidget):
     def select_item(self, item_id: Optional[int]):
         self.selected_item_id = item_id
         self.update()
+
+    def _color_for_camera(self, cam_id: int) -> QColor:
+        if cam_id in self.PIN_COLORS:
+            return self.PIN_COLORS[cam_id]
+        return self.FALLBACK_COLORS[cam_id % len(self.FALLBACK_COLORS)]
 
     def _room_to_pixel(self, room_x: float, room_y: float) -> Tuple[int, int]:
         draw_w = self.width() - 2 * self._padding
@@ -96,33 +103,25 @@ class RoomMap(QWidget):
             painter.setFont(font)
             painter.drawText(zx1 + 4, zy1 + 12, zone.get("name", "Zone"))
 
-        cam0_x, cam0_y = self._room_to_pixel(0.1, 0.1)
-        cam1_x, cam1_y = self._room_to_pixel(self.room_width - 0.1, self.room_height - 0.1)
+        for cam in self.cameras:
+            if not cam.get("enabled"):
+                continue
+            cam_id = cam.get("id", 0)
+            cam_px, cam_py = self._room_to_pixel(cam.get("x", 0), cam.get("y", 0))
+            color = self._color_for_camera(cam_id)
+            label = cam.get("label", f"Camera {cam_id}")
 
-        painter.setPen(QPen(QColor(255, 100, 100), 2))
-        painter.setBrush(QBrush(QColor(255, 100, 100, 80)))
-        painter.drawEllipse(cam0_x - 8, cam0_y - 8, 16, 16)
-        painter.drawText(cam0_x + 12, cam0_y + 5, "Cam 0")
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 80)))
+            painter.drawEllipse(cam_px - 8, cam_py - 8, 16, 16)
+            painter.setFont(QFont("Segoe UI", 8))
+            painter.drawText(cam_px + 12, cam_py + 5, label)
 
-        painter.setPen(QPen(QColor(100, 100, 255), 2))
-        painter.setBrush(QBrush(QColor(100, 100, 255, 80)))
-        painter.drawEllipse(cam1_x - 8, cam1_y - 8, 16, 16)
-        painter.drawText(cam1_x - 40, cam1_y + 5, "Cam 1")
-
-        if self.center_camera_enabled:
-            center_px, center_py = self._room_to_pixel(
-                self.room_width / 2.0, self.room_height / 2.0
-            )
-            painter.setPen(QPen(QColor(100, 255, 180), 2))
-            painter.setBrush(QBrush(QColor(100, 255, 180, 80)))
-            painter.drawEllipse(center_px - 10, center_py - 10, 20, 20)
-            painter.drawText(center_px + 14, center_py + 5, "360")
-
-            painter.setPen(QPen(QColor(100, 255, 180, 40), 1, Qt.DotLine))
-            painter.setBrush(Qt.NoBrush)
-            radius = min(draw_w, draw_h) // 2 - 10
-            painter.drawEllipse(center_px - radius, center_py - radius,
-                                radius * 2, radius * 2)
+            if cam.get("is_360"):
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 40), 1, Qt.DotLine))
+                painter.setBrush(Qt.NoBrush)
+                radius = min(draw_w, draw_h) // 2 - 10
+                painter.drawEllipse(cam_px - radius, cam_py - radius, radius * 2, radius * 2)
 
         for item in self.items:
             room_x = item.get("room_x", 0)
@@ -132,7 +131,7 @@ class RoomMap(QWidget):
             cam_id = item.get("camera_id", 0)
             is_selected = item.get("id") == self.selected_item_id
 
-            color = self.PIN_COLORS.get(cam_id, QColor(200, 200, 200))
+            color = self._color_for_camera(cam_id)
             if is_selected:
                 color = QColor(255, 255, 0)
 
@@ -143,12 +142,11 @@ class RoomMap(QWidget):
                                 pin_size, pin_size)
 
             label = item.get("label", "?")
-            cam_label = CAMERA_LABELS.get(cam_id, f"cam{cam_id}")
             font = QFont("Segoe UI", 7)
             painter.setFont(font)
             painter.setPen(QPen(QColor(200, 200, 200), 1))
             text_rect = QRect(px + 8, py - 8, 120, 16)
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
-                             f"{label} [{cam_label}]")
+                             f"{label} [cam{cam_id}]")
 
         painter.end()

@@ -1,7 +1,6 @@
 ﻿import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
-from found_it.config import CAMERA_CORNERS, CENTER_CAMERA_ID
 from found_it.storage.models import DetectedItem, RoomConfig
 
 
@@ -9,43 +8,26 @@ class ItemMapper:
     def __init__(self, room_config: RoomConfig):
         self.room = room_config
 
+    def get_camera(self, camera_id: int) -> Optional[dict]:
+        for cam in self.room.cameras:
+            if cam["id"] == camera_id:
+                return cam
+        return None
+
     def pixel_to_room(self, zone_x: float, zone_y: float,
                       camera_id: int) -> Tuple[float, float]:
-        if camera_id == CENTER_CAMERA_ID:
-            return self._center_camera_to_room(zone_x, zone_y)
+        cam = self.get_camera(camera_id)
+        cam_x = cam["x"] if cam else self.room.width_m / 2.0
+        cam_y = cam["y"] if cam else self.room.height_m / 2.0
 
-        corner = CAMERA_CORNERS[camera_id] if camera_id < len(CAMERA_CORNERS) else "top-left"
+        # Objects are positioned relative to wherever the camera actually
+        # sits in the room: each detection is an offset from the camera's
+        # placed (x, y), scaled by the room size, and clamped to the room.
+        room_x = cam_x + (zone_x - 0.5) * self.room.width_m
+        room_y = cam_y + (zone_y - 0.5) * self.room.height_m
 
-        if corner == "top-left":
-            room_x = zone_x * self.room.width_m
-            room_y = zone_y * self.room.height_m
-        elif corner == "bottom-right":
-            room_x = (1.0 - zone_x) * self.room.width_m
-            room_y = (1.0 - zone_y) * self.room.height_m
-        elif corner == "top-right":
-            room_x = (1.0 - zone_x) * self.room.width_m
-            room_y = zone_y * self.room.height_m
-        elif corner == "bottom-left":
-            room_x = zone_x * self.room.width_m
-            room_y = (1.0 - zone_y) * self.room.height_m
-        else:
-            room_x = zone_x * self.room.width_m
-            room_y = zone_y * self.room.height_m
-
-        return (room_x, room_y)
-
-    def _center_camera_to_room(self, zone_x: float, zone_y: float) -> Tuple[float, float]:
-        cx = self.room.width_m / 2.0
-        cy = self.room.height_m / 2.0
-
-        half_w = self.room.width_m / 2.0
-        half_h = self.room.height_m / 2.0
-
-        room_x = cx + (zone_x - 0.5) * 2.0 * half_w
-        room_y = cy + (zone_y - 0.5) * 2.0 * half_h
-
-        room_x = max(0, min(self.room.width_m, room_x))
-        room_y = max(0, min(self.room.height_m, room_y))
+        room_x = max(0.0, min(self.room.width_m, room_x))
+        room_y = max(0.0, min(self.room.height_m, room_y))
 
         return (room_x, room_y)
 

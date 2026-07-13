@@ -6,10 +6,7 @@
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
-from found_it.config import (
-    CAMERA_IDS, CENTER_CAMERA_ENABLED, CENTER_CAMERA_ID,
-    DETECTION_FRAME_SKIP, DEWARP_ENABLED, ITEM_INACTIVE_SECONDS
-)
+from found_it.config import DETECTION_FRAME_SKIP, DEWARP_ENABLED, ITEM_INACTIVE_SECONDS
 from found_it.camera.capture import CameraCapture
 from found_it.camera.dewarp import FisheyeDewarp, EquirectangularDewarp
 from found_it.detection.detector import ItemDetector
@@ -38,11 +35,12 @@ class MainWindow(QMainWindow):
         self.mapper = ItemMapper(self.room_config)
         self.cameras = {}
         self.dewarpers = {}
+        self.cam_views = {}
         self._frame_count = 0
 
         self._setup_ui()
         self._setup_timers()
-        self._start_cameras()
+        self._apply_camera_config()
 
     def _setup_ui(self):
         central = QWidget()
@@ -169,12 +167,6 @@ class MainWindow(QMainWindow):
         self.dewarp_check.setChecked(DEWARP_ENABLED)
         self.dewarp_check.setStyleSheet("color: #aaa;")
         controls.addWidget(self.dewarp_check)
-
-        self.center_cam_check = QCheckBox("360 Cam")
-        self.center_cam_check.setChecked(CENTER_CAMERA_ENABLED)
-        self.center_cam_check.setStyleSheet("color: #aaa;")
-        self.center_cam_check.stateChanged.connect(self._on_center_cam_toggle)
-        controls.addWidget(self.center_cam_check)
         controls.addStretch()
         left_layout.addLayout(controls)
 
@@ -188,21 +180,6 @@ class MainWindow(QMainWindow):
             }
             QTabBar::tab:selected { background: #2a2a3e; color: #e0e0e0; }
         """)
-
-        self.cam_view_0 = CameraView(0)
-        self.cam_view_1 = CameraView(1)
-        self.cam_view_2 = CameraView(2)
-
-        self.cam_tabs.addTab(self.cam_view_0, "Cam 0 (Corner)")
-        self.cam_tabs.addTab(self.cam_view_1, "Cam 1 (Corner)")
-        self.cam_tabs.addTab(self.cam_view_2, "360 (Center)")
-
-        if CENTER_CAMERA_ENABLED:
-            self.cam_tabs.setTabVisible(0, False)
-            self.cam_tabs.setTabVisible(1, False)
-        else:
-            self.cam_tabs.setTabVisible(2, False)
-
         left_layout.addWidget(self.cam_tabs)
 
         center_panel = QWidget()
@@ -224,7 +201,7 @@ class MainWindow(QMainWindow):
         self.room_map = RoomMap()
         self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
         self.room_map.set_zones(self.room_config.zones)
-        self.room_map.set_center_camera(CENTER_CAMERA_ENABLED)
+        self.room_map.set_cameras(self.room_config.cameras)
         center_layout.addWidget(self.room_map)
 
         self.search_panel = SearchPanel()
@@ -267,6 +244,7 @@ class MainWindow(QMainWindow):
         self.mapper.room = self.room_config
         self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
         self.room_map.set_zones(self.room_config.zones)
+        self._apply_camera_config()
 
     def _setup_timers(self):
         self._detect_timer = QTimer()
@@ -285,77 +263,44 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self._refresh_display)
         self._refresh_timer.start(2000)
 
-    def _start_cameras(self):
-        active_ids = [] if CENTER_CAMERA_ENABLED else list(CAMERA_IDS)
-        if CENTER_CAMERA_ENABLED:
-            active_ids.append(CENTER_CAMERA_ID)
+    def _apply_camera_config(self):
+        for cam in self.cameras.values():
+            cam.stop()
+        self.cameras = {}
+        self.dewarpers = {}
+        self.cam_views = {}
+        self.cam_tabs.clear()
 
-        for cam_id in active_ids:
+        for cam_cfg in self.room_config.cameras:
+            if not cam_cfg.get("enabled"):
+                continue
+
+            cam_id = cam_cfg["id"]
+            label = cam_cfg.get("label", f"Camera {cam_id}")
+
+            view = CameraView(cam_id)
+            self.cam_tabs.addTab(view, label)
+            self.cam_views[cam_id] = view
+
             cam = CameraCapture(cam_id)
-            if cam.start():
-                self.cameras[cam_id] = cam
-                self.statusBar().showMessage(f"Camera {cam_id} connected")
-            else:
+            if not cam.start():
                 self.statusBar().showMessage(f"Camera {cam_id} not found")
+                continue
 
-        if DEWARP_ENABLED:
-            for cam_id in CAMERA_IDS:
-                if cam_id in self.cameras:
-                    dewarper = FisheyeDewarp(cam_id)
-                    frame = self.cameras[cam_id].get_frame()
-                    if frame is not None:
-                        h, w = frame.shape[:2]
-                        dewarper.load_calibration((w, h))
-                    self.dewarpers[cam_id] = dewarper
+            self.cameras[cam_id] = cam
+            self.statusBar().showMessage(f"Camera {cam_id} connected")
 
-        if CENTER_CAMERA_ENABLED and CENTER_CAMERA_ID in self.cameras:
-            self.dewarpers[CENTER_CAMERA_ID] = EquirectangularDewarp(
-                fov=90.0, num_views=4
-            )
+            if cam_cfg.get("is_360"):
+                self.dewarpers[cam_id] = EquirectangularDewarp(fov=90.0, num_views=4)
+            elif DEWARP_ENABLED:
+                dewarper = FisheyeDewarp(cam_id)
+                frame = cam.get_frame()
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    dewarper.load_calibration((w, h))
+                self.dewarpers[cam_id] = dewarper
 
-    def _on_center_cam_toggle(self, state):
-        enabled = state == Qt.Checked
-        self.room_map.set_center_camera(enabled)
-        self.cam_tabs.setTabVisible(2, enabled)
-        self.cam_tabs.setTabVisible(0, not enabled)
-        self.cam_tabs.setTabVisible(1, not enabled)
-
-        if enabled and CENTER_CAMERA_ID not in self.cameras:
-            cam = CameraCapture(CENTER_CAMERA_ID)
-            if cam.start():
-                self.cameras[CENTER_CAMERA_ID] = cam
-                self.dewarpers[CENTER_CAMERA_ID] = EquirectangularDewarp(
-                    fov=90.0, num_views=4
-                )
-        elif not enabled and CENTER_CAMERA_ID in self.cameras:
-            self.cameras[CENTER_CAMERA_ID].stop()
-            del self.cameras[CENTER_CAMERA_ID]
-            if CENTER_CAMERA_ID in self.dewarpers:
-                del self.dewarpers[CENTER_CAMERA_ID]
-
-        if enabled:
-            for cam_id in CAMERA_IDS:
-                if cam_id in self.cameras:
-                    self.cameras[cam_id].stop()
-                    del self.cameras[cam_id]
-                if cam_id in self.dewarpers:
-                    del self.dewarpers[cam_id]
-        else:
-            for cam_id in CAMERA_IDS:
-                if cam_id not in self.cameras:
-                    cam = CameraCapture(cam_id)
-                    if cam.start():
-                        self.cameras[cam_id] = cam
-                        self.statusBar().showMessage(f"Camera {cam_id} connected")
-                        if DEWARP_ENABLED:
-                            dewarper = FisheyeDewarp(cam_id)
-                            frame = cam.get_frame()
-                            if frame is not None:
-                                h, w = frame.shape[:2]
-                                dewarper.load_calibration((w, h))
-                            self.dewarpers[cam_id] = dewarper
-                    else:
-                        self.statusBar().showMessage(f"Camera {cam_id} not found")
+        self.room_map.set_cameras(self.room_config.cameras)
 
     def _detection_cycle(self):
         self._frame_count += 1
@@ -364,15 +309,9 @@ class MainWindow(QMainWindow):
 
         all_detections_per_cam = []
 
-        for cam_id in [0, 1]:
-            cam = self.cameras.get(cam_id)
-            if cam is None:
-                all_detections_per_cam.append([])
-                continue
-
+        for cam_id, cam in self.cameras.items():
             frame = cam.get_frame()
             if frame is None:
-                all_detections_per_cam.append([])
                 continue
 
             if self.dewarp_check.isChecked() and cam_id in self.dewarpers:
@@ -380,17 +319,6 @@ class MainWindow(QMainWindow):
 
             detections = self.detector.detect(frame, cam_id)
             all_detections_per_cam.append(detections)
-
-        if CENTER_CAMERA_ENABLED and CENTER_CAMERA_ID in self.cameras:
-            cam = self.cameras[CENTER_CAMERA_ID]
-            frame = cam.get_frame()
-            if frame is not None:
-                if self.dewarp_check.isChecked() and CENTER_CAMERA_ID in self.dewarpers:
-                    frame = self.dewarpers[CENTER_CAMERA_ID].dewarp(frame)
-                detections = self.detector.detect(frame, CENTER_CAMERA_ID)
-                all_detections_per_cam.append(detections)
-            else:
-                all_detections_per_cam.append([])
 
         merged = self.mapper.merge_detections(all_detections_per_cam)
 
@@ -425,8 +353,6 @@ class MainWindow(QMainWindow):
         )
 
     def _display_cycle(self):
-        view_map = {0: self.cam_view_0, 1: self.cam_view_1, 2: self.cam_view_2}
-
         for cam_id, cam in self.cameras.items():
             frame = cam.get_frame()
             if frame is None:
@@ -435,7 +361,7 @@ class MainWindow(QMainWindow):
             if self.dewarp_check.isChecked() and cam_id in self.dewarpers:
                 frame = self.dewarpers[cam_id].dewarp(frame)
 
-            view = view_map.get(cam_id)
+            view = self.cam_views.get(cam_id)
             if view is not None:
                 view.update_frame(frame)
 

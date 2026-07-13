@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
-    QFrame, QDoubleSpinBox, QSplitter
+    QFrame, QDoubleSpinBox, QSpinBox, QSplitter
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush
@@ -57,12 +57,33 @@ LIST_STYLE = """
     QListWidget::item:hover { background-color: #2a2a4e; }
 """
 
+CAMERA_COLORS = {
+    0: QColor(255, 100, 100),
+    1: QColor(100, 100, 255),
+    2: QColor(100, 255, 180),
+}
+CAMERA_FALLBACK_COLORS = [
+    QColor(255, 180, 60), QColor(200, 100, 255), QColor(255, 100, 200),
+    QColor(120, 220, 255), QColor(180, 255, 100),
+]
+
+
+def _camera_color(cam_id: int) -> QColor:
+    if cam_id in CAMERA_COLORS:
+        return CAMERA_COLORS[cam_id]
+    return CAMERA_FALLBACK_COLORS[cam_id % len(CAMERA_FALLBACK_COLORS)]
+
 
 class RoomCanvas(QWidget):
-    """Interactive canvas for laying out a room: drag to draw a named zone."""
+    """Interactive canvas for laying out a room: drag to draw a named zone
+    or drag a camera marker to reposition it."""
 
     zone_drawn = pyqtSignal(float, float, float, float)
     zone_selected = pyqtSignal(int)
+    camera_moved = pyqtSignal(int, float, float)
+    camera_drag_finished = pyqtSignal()
+
+    CAMERA_HIT_RADIUS_PX = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,10 +91,12 @@ class RoomCanvas(QWidget):
         self.room_width = 4.0
         self.room_height = 4.0
         self.zones: List[dict] = []
+        self.cameras: List[dict] = []
         self.draw_mode = False
         self.selected_index: Optional[int] = None
         self._drag_start: Optional[Tuple[float, float]] = None
         self._drag_current: Optional[Tuple[float, float]] = None
+        self._dragging_camera_index: Optional[int] = None
         self._padding = 30
 
     def set_room_size(self, width: float, height: float):
@@ -84,6 +107,10 @@ class RoomCanvas(QWidget):
     def set_zones(self, zones: List[dict]):
         self.zones = zones
         self.selected_index = None
+        self.update()
+
+    def set_cameras(self, cameras: List[dict]):
+        self.cameras = cameras
         self.update()
 
     def set_draw_mode(self, enabled: bool):
@@ -118,24 +145,46 @@ class RoomCanvas(QWidget):
             self._drag_start = self._px_to_m(event.x(), event.y())
             self._drag_current = self._drag_start
             self.update()
-        else:
-            mx, my = self._px_to_m(event.x(), event.y())
-            for i, z in enumerate(self.zones):
-                if z["x1"] <= mx <= z["x2"] and z["y1"] <= my <= z["y2"]:
-                    self.selected_index = i
-                    self.zone_selected.emit(i)
-                    self.update()
-                    return
-            self.selected_index = None
-            self.update()
+            return
+
+        for i, cam in enumerate(self.cameras):
+            cx, cy = self._m_to_px(cam.get("x", 0), cam.get("y", 0))
+            if (event.x() - cx) ** 2 + (event.y() - cy) ** 2 <= self.CAMERA_HIT_RADIUS_PX ** 2:
+                self._dragging_camera_index = i
+                self.update()
+                return
+
+        mx, my = self._px_to_m(event.x(), event.y())
+        for i, z in enumerate(self.zones):
+            if z["x1"] <= mx <= z["x2"] and z["y1"] <= my <= z["y2"]:
+                self.selected_index = i
+                self.zone_selected.emit(i)
+                self.update()
+                return
+        self.selected_index = None
+        self.update()
 
     def mouseMoveEvent(self, event):
+        if self._dragging_camera_index is not None:
+            mx, my = self._px_to_m(event.x(), event.y())
+            cam = self.cameras[self._dragging_camera_index]
+            cam["x"] = mx
+            cam["y"] = my
+            self.camera_moved.emit(self._dragging_camera_index, mx, my)
+            self.update()
+            return
         if self.draw_mode and self._drag_start is not None:
             self._drag_current = self._px_to_m(event.x(), event.y())
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if self.draw_mode and self._drag_start is not None and event.button() == Qt.LeftButton:
+        if event.button() != Qt.LeftButton:
+            return
+        if self._dragging_camera_index is not None:
+            self._dragging_camera_index = None
+            self.camera_drag_finished.emit()
+            return
+        if self.draw_mode and self._drag_start is not None:
             end = self._px_to_m(event.x(), event.y())
             x1, x2 = sorted((self._drag_start[0], end[0]))
             y1, y2 = sorted((self._drag_start[1], end[1]))
@@ -182,6 +231,19 @@ class RoomCanvas(QWidget):
             painter.setBrush(QBrush(QColor(100, 255, 180, 40)))
             painter.drawRect(x1, y1, x2 - x1, y2 - y1)
 
+        for i, cam in enumerate(self.cameras):
+            cx, cy = self._m_to_px(cam.get("x", 0), cam.get("y", 0))
+            color = _camera_color(cam.get("id", 0))
+            alpha = 255 if cam.get("enabled") else 90
+            is_dragging = i == self._dragging_camera_index
+            radius = 10 if is_dragging else 8
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), alpha), 2))
+            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), min(alpha, 130))))
+            painter.drawEllipse(cx - radius, cy - radius, radius * 2, radius * 2)
+            painter.setPen(QPen(QColor(230, 230, 230, alpha), 1))
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.drawText(cx + 12, cy + 4, cam.get("label", f"Camera {cam.get('id', 0)}"))
+
         painter.end()
 
 
@@ -194,9 +256,11 @@ class RoomSetupPanel(QWidget):
         super().__init__(parent)
         self.room_config = load_room_config()
         self.zones: List[dict] = [dict(z) for z in self.room_config.zones]
+        self.cameras: List[dict] = [dict(c) for c in self.room_config.cameras]
         self._setup_ui()
         self._load_from_config()
         self._refresh_zone_list()
+        self._refresh_camera_list()
         self._refresh_object_list()
 
     def _setup_ui(self):
@@ -243,6 +307,8 @@ class RoomSetupPanel(QWidget):
         self.canvas = RoomCanvas()
         self.canvas.zone_drawn.connect(self._on_zone_drawn)
         self.canvas.zone_selected.connect(self._on_zone_selected_in_canvas)
+        self.canvas.camera_moved.connect(self._on_camera_moved)
+        self.canvas.camera_drag_finished.connect(self._on_camera_drag_finished)
         left_layout.addWidget(self.canvas)
 
         self.status_label = QLabel("")
@@ -255,6 +321,66 @@ class RoomSetupPanel(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 4, 0, 4)
+
+        right_layout.addWidget(self._label("Cameras"))
+
+        camera_add_row = QHBoxLayout()
+        self.camera_id_input = QSpinBox()
+        self.camera_id_input.setRange(0, 9)
+        self.camera_id_input.setPrefix("ID ")
+        self.camera_id_input.setStyleSheet(INPUT_STYLE)
+        camera_add_row.addWidget(self.camera_id_input)
+
+        self.camera_label_input = QLineEdit()
+        self.camera_label_input.setPlaceholderText("e.g. Desk Cam")
+        self.camera_label_input.setStyleSheet(INPUT_STYLE)
+        camera_add_row.addWidget(self.camera_label_input)
+
+        self.add_camera_btn = QPushButton("Add Camera")
+        self.add_camera_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.add_camera_btn.clicked.connect(self._on_add_camera)
+        camera_add_row.addWidget(self.add_camera_btn)
+        right_layout.addLayout(camera_add_row)
+
+        camera_hint = QLabel("Drag a camera's marker on the room to place it where it actually sits. Detected objects are positioned relative to that camera.")
+        camera_hint.setStyleSheet("color: #666; font-size: 10px;")
+        camera_hint.setWordWrap(True)
+        right_layout.addWidget(camera_hint)
+
+        self.camera_list = QListWidget()
+        self.camera_list.setStyleSheet(LIST_STYLE)
+        self.camera_list.itemClicked.connect(self._on_camera_list_clicked)
+        self.camera_list.itemChanged.connect(self._on_camera_item_changed)
+        right_layout.addWidget(self.camera_list)
+
+        camera_edit_row = QHBoxLayout()
+        self.camera_rename_input = QLineEdit()
+        self.camera_rename_input.setPlaceholderText("Rename selected camera")
+        self.camera_rename_input.setStyleSheet(INPUT_STYLE)
+        camera_edit_row.addWidget(self.camera_rename_input)
+
+        self.rename_camera_btn = QPushButton("Rename")
+        self.rename_camera_btn.setStyleSheet(BUTTON_STYLE)
+        self.rename_camera_btn.clicked.connect(self._on_rename_camera)
+        camera_edit_row.addWidget(self.rename_camera_btn)
+        right_layout.addLayout(camera_edit_row)
+
+        camera_action_row = QHBoxLayout()
+        self.toggle_360_btn = QPushButton("Toggle 360°")
+        self.toggle_360_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.toggle_360_btn.clicked.connect(self._on_toggle_360)
+        camera_action_row.addWidget(self.toggle_360_btn)
+
+        self.remove_camera_btn = QPushButton("Remove")
+        self.remove_camera_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.remove_camera_btn.clicked.connect(self._on_remove_camera)
+        camera_action_row.addWidget(self.remove_camera_btn)
+        right_layout.addLayout(camera_action_row)
+
+        camera_separator = QFrame()
+        camera_separator.setFrameShape(QFrame.HLine)
+        camera_separator.setStyleSheet("color: #333;")
+        right_layout.addWidget(camera_separator)
 
         right_layout.addWidget(self._label("Zones / Furniture"))
 
@@ -332,7 +458,9 @@ class RoomSetupPanel(QWidget):
         outer.addWidget(splitter)
 
         self._selected_zone_index: Optional[int] = None
+        self._selected_camera_index: Optional[int] = None
         self._selected_object_id: Optional[int] = None
+        self._updating_camera_list = False
 
     def _label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -348,6 +476,7 @@ class RoomSetupPanel(QWidget):
         self.height_input.blockSignals(False)
         self.canvas.set_room_size(self.room_config.width_m, self.room_config.height_m)
         self.canvas.set_zones(self.zones)
+        self.canvas.set_cameras(self.cameras)
 
     def _on_size_changed(self):
         self.canvas.set_room_size(self.width_input.value(), self.height_input.value())
@@ -423,9 +552,101 @@ class RoomSetupPanel(QWidget):
         self.room_config.width_m = self.width_input.value()
         self.room_config.height_m = self.height_input.value()
         self.room_config.zones = self.zones
+        self.room_config.cameras = self.cameras
         save_room_config(self.room_config)
         self.status_label.setText("Room saved.")
         self.room_updated.emit()
+
+    def _refresh_camera_list(self):
+        self._updating_camera_list = True
+        self.camera_list.clear()
+        for i, cam in enumerate(self.cameras):
+            tag = ", 360°" if cam.get("is_360") else ""
+            text = (f"{cam['label']}  (id {cam['id']}{tag}) "
+                    f"@ ({cam['x']:.1f}, {cam['y']:.1f})")
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if cam.get("enabled") else Qt.Unchecked)
+            item.setData(Qt.UserRole, i)
+            self.camera_list.addItem(item)
+        self._updating_camera_list = False
+
+    def _on_add_camera(self):
+        cam_id = self.camera_id_input.value()
+        if any(c["id"] == cam_id for c in self.cameras):
+            self.status_label.setText(f"Camera ID {cam_id} is already in the list.")
+            return
+        label = self.camera_label_input.text().strip() or f"Camera {cam_id}"
+        self.cameras.append({
+            "id": cam_id,
+            "label": label,
+            "enabled": True,
+            "x": self.width_input.value() / 2.0,
+            "y": self.height_input.value() / 2.0,
+            "is_360": False,
+        })
+        self.canvas.set_cameras(self.cameras)
+        self._refresh_camera_list()
+        self.camera_label_input.clear()
+        self.status_label.setText(f"Added \"{label}\". Drag it into place, then Save Room.")
+
+    def _on_camera_list_clicked(self, item: QListWidgetItem):
+        index = item.data(Qt.UserRole)
+        self._selected_camera_index = index
+        self.camera_rename_input.setText(self.cameras[index]["label"])
+
+    def _on_camera_item_changed(self, item: QListWidgetItem):
+        if self._updating_camera_list:
+            return
+        index = item.data(Qt.UserRole)
+        if index is None:
+            return
+        self.cameras[index]["enabled"] = item.checkState() == Qt.Checked
+        self.canvas.set_cameras(self.cameras)
+        self.status_label.setText("Don't forget to Save Room.")
+
+    def _on_rename_camera(self):
+        if self._selected_camera_index is None:
+            self.status_label.setText("Select a camera to rename first.")
+            return
+        new_label = self.camera_rename_input.text().strip()
+        if not new_label:
+            return
+        self.cameras[self._selected_camera_index]["label"] = new_label
+        self.canvas.set_cameras(self.cameras)
+        self._refresh_camera_list()
+        self.camera_list.setCurrentRow(self._selected_camera_index)
+        self.status_label.setText(f"Renamed camera to \"{new_label}\". Don't forget to Save Room.")
+
+    def _on_toggle_360(self):
+        if self._selected_camera_index is None:
+            self.status_label.setText("Select a camera first.")
+            return
+        cam = self.cameras[self._selected_camera_index]
+        cam["is_360"] = not cam.get("is_360", False)
+        self.canvas.set_cameras(self.cameras)
+        self._refresh_camera_list()
+        self.camera_list.setCurrentRow(self._selected_camera_index)
+        state = "a 360°" if cam["is_360"] else "a standard"
+        self.status_label.setText(f"\"{cam['label']}\" is now {state} camera. Don't forget to Save Room.")
+
+    def _on_remove_camera(self):
+        if self._selected_camera_index is None:
+            self.status_label.setText("Select a camera to remove first.")
+            return
+        removed = self.cameras.pop(self._selected_camera_index)
+        self._selected_camera_index = None
+        self.camera_rename_input.clear()
+        self.canvas.set_cameras(self.cameras)
+        self._refresh_camera_list()
+        self.status_label.setText(f"Removed \"{removed['label']}\". Don't forget to Save Room.")
+
+    def _on_camera_moved(self, index: int, x: float, y: float):
+        self.status_label.setText(f"{self.cameras[index]['label']} at ({x:.2f}m, {y:.2f}m)")
+
+    def _on_camera_drag_finished(self):
+        self._refresh_camera_list()
+        self.status_label.setText(self.status_label.text() + " - don't forget to Save Room.")
 
     def _refresh_object_list(self):
         db = Database()

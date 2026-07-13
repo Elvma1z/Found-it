@@ -29,12 +29,16 @@ class RoomZone:
     y2: float
 
 
+def default_cameras() -> list:
+    return [
+        {"id": 0, "label": "Camera 0", "enabled": True, "x": 0.3, "y": 0.3, "is_360": False},
+        {"id": 1, "label": "Camera 1", "enabled": True, "x": 3.7, "y": 3.7, "is_360": False},
+    ]
+
+
 @dataclass
 class RoomConfig:
     width_m: float = 4.0
     height_m: float = 4.0
-    camera0_corner: str = "top-left"
-    camera1_corner: str = "bottom-right"
-    center_camera_enabled: bool = False
-    center_camera_position: str = "center"
+    cameras: list = field(default_factory=default_cameras)
     zones: list = field(default_factory=list)
