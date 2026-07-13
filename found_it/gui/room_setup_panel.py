@@ -74,12 +74,46 @@ def _camera_color(cam_id: int) -> QColor:
     return CAMERA_FALLBACK_COLORS[cam_id % len(CAMERA_FALLBACK_COLORS)]
 
 
+def _remap_drawers(drawers: List[dict], old_x1: float, old_y1: float, old_x2: float, old_y2: float,
+                    new_x1: float, new_y1: float, new_x2: float, new_y2: float) -> List[dict]:
+    """Re-fit drawer rectangles proportionally when their parent zone moves or resizes."""
+    old_w = (old_x2 - old_x1) or 1.0
+    old_h = (old_y2 - old_y1) or 1.0
+    new_w = new_x2 - new_x1
+    new_h = new_y2 - new_y1
+    remapped = []
+    for d in drawers:
+        rel_x1 = (d["x1"] - old_x1) / old_w
+        rel_y1 = (d["y1"] - old_y1) / old_h
+        rel_x2 = (d["x2"] - old_x1) / old_w
+        rel_y2 = (d["y2"] - old_y1) / old_h
+        remapped.append({
+            "name": d["name"],
+            "x1": new_x1 + rel_x1 * new_w,
+            "y1": new_y1 + rel_y1 * new_h,
+            "x2": new_x1 + rel_x2 * new_w,
+            "y2": new_y1 + rel_y2 * new_h,
+        })
+    return remapped
+
+
+def _clamp_axis(a1: float, a2: float, room_size: float) -> Tuple[float, float]:
+    """Slide a span [a1, a2] to stay within [0, room_size] without ever changing its size."""
+    size = a2 - a1
+    if a1 < 0:
+        return 0.0, size
+    if a2 > room_size:
+        return room_size - size, room_size
+    return a1, a2
+
+
 class RoomCanvas(QWidget):
     """Interactive canvas for laying out a room: drag to draw a named zone
     or drag a camera marker to reposition it."""
 
     zone_drawn = pyqtSignal(float, float, float, float)
     zone_selected = pyqtSignal(int)
+    zone_drag_finished = pyqtSignal()
     camera_moved = pyqtSignal(int, float, float)
     camera_drag_finished = pyqtSignal()
 
@@ -97,6 +131,10 @@ class RoomCanvas(QWidget):
         self._drag_start: Optional[Tuple[float, float]] = None
         self._drag_current: Optional[Tuple[float, float]] = None
         self._dragging_camera_index: Optional[int] = None
+        self._dragging_zone_index: Optional[int] = None
+        self._zone_drag_start_mouse: Optional[Tuple[float, float]] = None
+        self._zone_drag_start_bounds: Optional[Tuple[float, float, float, float]] = None
+        self._zone_drag_start_drawers: Optional[List[dict]] = None
         self._padding = 30
 
     def set_room_size(self, width: float, height: float):
@@ -159,6 +197,10 @@ class RoomCanvas(QWidget):
             if z["x1"] <= mx <= z["x2"] and z["y1"] <= my <= z["y2"]:
                 self.selected_index = i
                 self.zone_selected.emit(i)
+                self._dragging_zone_index = i
+                self._zone_drag_start_mouse = (mx, my)
+                self._zone_drag_start_bounds = (z["x1"], z["y1"], z["x2"], z["y2"])
+                self._zone_drag_start_drawers = [dict(d) for d in z.get("drawers", [])]
                 self.update()
                 return
         self.selected_index = None
@@ -173,6 +215,24 @@ class RoomCanvas(QWidget):
             self.camera_moved.emit(self._dragging_camera_index, mx, my)
             self.update()
             return
+        if self._dragging_zone_index is not None:
+            mx, my = self._px_to_m(event.x(), event.y())
+            start_mx, start_my = self._zone_drag_start_mouse
+            ox1, oy1, ox2, oy2 = self._zone_drag_start_bounds
+            dx = mx - start_mx
+            dy = my - start_my
+
+            nx1, nx2 = _clamp_axis(ox1 + dx, ox2 + dx, self.room_width)
+            ny1, ny2 = _clamp_axis(oy1 + dy, oy2 + dy, self.room_height)
+
+            zone = self.zones[self._dragging_zone_index]
+            zone["x1"], zone["y1"], zone["x2"], zone["y2"] = nx1, ny1, nx2, ny2
+            if self._zone_drag_start_drawers:
+                zone["drawers"] = _remap_drawers(
+                    self._zone_drag_start_drawers, ox1, oy1, ox2, oy2, nx1, ny1, nx2, ny2
+                )
+            self.update()
+            return
         if self.draw_mode and self._drag_start is not None:
             self._drag_current = self._px_to_m(event.x(), event.y())
             self.update()
@@ -183,6 +243,13 @@ class RoomCanvas(QWidget):
         if self._dragging_camera_index is not None:
             self._dragging_camera_index = None
             self.camera_drag_finished.emit()
+            return
+        if self._dragging_zone_index is not None:
+            self._dragging_zone_index = None
+            self._zone_drag_start_mouse = None
+            self._zone_drag_start_bounds = None
+            self._zone_drag_start_drawers = None
+            self.zone_drag_finished.emit()
             return
         if self.draw_mode and self._drag_start is not None:
             end = self._px_to_m(event.x(), event.y())
@@ -317,6 +384,7 @@ class RoomSetupPanel(QWidget):
         self.canvas = RoomCanvas()
         self.canvas.zone_drawn.connect(self._on_zone_drawn)
         self.canvas.zone_selected.connect(self._on_zone_selected_in_canvas)
+        self.canvas.zone_drag_finished.connect(self._on_zone_drag_finished)
         self.canvas.camera_moved.connect(self._on_camera_moved)
         self.canvas.camera_drag_finished.connect(self._on_camera_drag_finished)
         left_layout.addWidget(self.canvas)
@@ -394,6 +462,11 @@ class RoomSetupPanel(QWidget):
 
         right_layout.addWidget(self._label("Zones / Furniture"))
 
+        zones_hint = QLabel("Drag a zone on the room to move it. Select one and rotate it 90° at a time to match how the furniture actually sits.")
+        zones_hint.setStyleSheet("color: #666; font-size: 10px;")
+        zones_hint.setWordWrap(True)
+        right_layout.addWidget(zones_hint)
+
         add_row = QHBoxLayout()
         self.zone_name_input = QLineEdit()
         self.zone_name_input.setPlaceholderText("e.g. Bed, Desk, Closet")
@@ -422,6 +495,11 @@ class RoomSetupPanel(QWidget):
         self.rename_zone_btn.setStyleSheet(BUTTON_STYLE)
         self.rename_zone_btn.clicked.connect(self._on_rename_zone)
         rename_row.addWidget(self.rename_zone_btn)
+
+        self.rotate_zone_btn = QPushButton("Rotate 90°")
+        self.rotate_zone_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.rotate_zone_btn.clicked.connect(self._on_rotate_zone)
+        rename_row.addWidget(self.rotate_zone_btn)
 
         self.delete_zone_btn = QPushButton("Delete")
         self.delete_zone_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
@@ -579,6 +657,12 @@ class RoomSetupPanel(QWidget):
         self.zone_rename_input.setText(self.zones[index]["name"])
         self._refresh_drawer_list()
 
+    def _on_zone_drag_finished(self):
+        self._refresh_zone_list()
+        if self._selected_zone_index is not None:
+            self.zone_list.setCurrentRow(self._selected_zone_index)
+        self.status_label.setText("Moved zone. Don't forget to Save Room.")
+
     def _on_rename_zone(self):
         if self._selected_zone_index is None:
             self.status_label.setText("Select a zone to rename first.")
@@ -592,6 +676,30 @@ class RoomSetupPanel(QWidget):
         self._refresh_zone_list()
         self.zone_list.setCurrentRow(self._selected_zone_index)
         self.status_label.setText(f"Renamed zone to \"{new_name}\". Don't forget to Save Room.")
+
+    def _on_rotate_zone(self):
+        if self._selected_zone_index is None:
+            self.status_label.setText("Select a zone to rotate first.")
+            return
+
+        zone = self.zones[self._selected_zone_index]
+        x1, y1, x2, y2 = zone["x1"], zone["y1"], zone["x2"], zone["y2"]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        half_w, half_h = (x2 - x1) / 2.0, (y2 - y1) / 2.0
+
+        room_w, room_h = self.width_input.value(), self.height_input.value()
+        nx1, nx2 = _clamp_axis(cx - half_h, cx + half_h, room_w)
+        ny1, ny2 = _clamp_axis(cy - half_w, cy + half_w, room_h)
+
+        zone["drawers"] = _remap_drawers(zone.get("drawers", []), x1, y1, x2, y2, nx1, ny1, nx2, ny2)
+        zone["x1"], zone["y1"], zone["x2"], zone["y2"] = nx1, ny1, nx2, ny2
+
+        self.canvas.set_zones(self.zones)
+        self.canvas.selected_index = self._selected_zone_index
+        self._refresh_zone_list()
+        self._refresh_drawer_list()
+        self.zone_list.setCurrentRow(self._selected_zone_index)
+        self.status_label.setText(f"Rotated \"{zone['name']}\" 90°. Don't forget to Save Room.")
 
     def _on_delete_zone(self):
         if self._selected_zone_index is None:
