@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+data/db/*.db
+data/snapshots/*.jpg
+data/calibration/*.npz
+*.pt
+.DS_Store
+Thumbs.db

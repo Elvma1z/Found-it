@@ -1,0 +1,42 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Found It (Debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "found_it.main",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": true,
+            "stopOnEntry": false,
+            "sudo": false,
+            "env": {
+                "PYTHONDONTWRITEBYTECODE": "1"
+            },
+            "args": [],
+            "debugOptions": [
+                "RedirectOutput"
+            ]
+        },
+        {
+            "name": "Found It (Attach)",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "${workspaceFolder}"
+                }
+            ]
+        }
+    ]
+}
