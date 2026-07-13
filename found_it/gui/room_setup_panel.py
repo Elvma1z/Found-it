@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
-    QFrame, QDoubleSpinBox, QSpinBox, QSplitter
+    QFrame, QDoubleSpinBox, QSpinBox, QComboBox, QSplitter
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush
@@ -11,7 +11,7 @@ from found_it.utils.room_config import load_room_config, save_room_config
 from found_it.storage.database import Database
 
 INPUT_STYLE = """
-    QLineEdit, QDoubleSpinBox {
+    QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {
         background-color: #2a2a3e;
         color: #e0e0e0;
         border: 1px solid #444;
@@ -19,7 +19,7 @@ INPUT_STYLE = """
         padding: 6px;
         font-size: 12px;
     }
-    QLineEdit:focus, QDoubleSpinBox:focus { border: 1px solid #6c63ff; }
+    QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #6c63ff; }
 """
 
 BUTTON_STYLE = """
@@ -224,6 +224,16 @@ class RoomCanvas(QWidget):
             painter.setFont(font)
             painter.drawText(x1 + 4, y1 + 14, zone.get("name", "Zone"))
 
+            for drawer in zone.get("drawers", []):
+                dx1, dy1 = self._m_to_px(drawer["x1"], drawer["y1"])
+                dx2, dy2 = self._m_to_px(drawer["x2"], drawer["y2"])
+                painter.setPen(QPen(QColor(255, 210, 90), 1, Qt.DotLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
+                painter.setPen(QPen(QColor(220, 210, 180), 1))
+                painter.setFont(QFont("Segoe UI", 6))
+                painter.drawText(dx1 + 3, dy1 + 11, drawer.get("name", "Drawer"))
+
         if self.draw_mode and self._drag_start and self._drag_current:
             x1, y1 = self._m_to_px(*self._drag_start)
             x2, y2 = self._m_to_px(*self._drag_current)
@@ -419,6 +429,47 @@ class RoomSetupPanel(QWidget):
         rename_row.addWidget(self.delete_zone_btn)
         right_layout.addLayout(rename_row)
 
+        drawers_hint = QLabel("Has drawers? Select a zone above (e.g. Dresser) and split it into named compartments so the app can be specific about which one an object was put in.")
+        drawers_hint.setStyleSheet("color: #666; font-size: 10px;")
+        drawers_hint.setWordWrap(True)
+        right_layout.addWidget(drawers_hint)
+
+        drawer_config_row = QHBoxLayout()
+        self.drawer_count_input = QSpinBox()
+        self.drawer_count_input.setRange(0, 8)
+        self.drawer_count_input.setPrefix("Drawers ")
+        self.drawer_count_input.setStyleSheet(INPUT_STYLE)
+        drawer_config_row.addWidget(self.drawer_count_input)
+
+        self.drawer_orientation_input = QComboBox()
+        self.drawer_orientation_input.addItems(["Stacked (top-bottom)", "Side by side (left-right)"])
+        self.drawer_orientation_input.setStyleSheet(INPUT_STYLE)
+        drawer_config_row.addWidget(self.drawer_orientation_input)
+
+        self.set_drawers_btn = QPushButton("Set Drawers")
+        self.set_drawers_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.set_drawers_btn.clicked.connect(self._on_set_drawers)
+        drawer_config_row.addWidget(self.set_drawers_btn)
+        right_layout.addLayout(drawer_config_row)
+
+        self.drawer_list = QListWidget()
+        self.drawer_list.setStyleSheet(LIST_STYLE)
+        self.drawer_list.setMaximumHeight(90)
+        self.drawer_list.itemClicked.connect(self._on_drawer_list_clicked)
+        right_layout.addWidget(self.drawer_list)
+
+        drawer_rename_row = QHBoxLayout()
+        self.drawer_rename_input = QLineEdit()
+        self.drawer_rename_input.setPlaceholderText("Rename selected drawer (e.g. Top Drawer)")
+        self.drawer_rename_input.setStyleSheet(INPUT_STYLE)
+        drawer_rename_row.addWidget(self.drawer_rename_input)
+
+        self.rename_drawer_btn = QPushButton("Rename")
+        self.rename_drawer_btn.setStyleSheet(BUTTON_STYLE)
+        self.rename_drawer_btn.clicked.connect(self._on_rename_drawer)
+        drawer_rename_row.addWidget(self.rename_drawer_btn)
+        right_layout.addLayout(drawer_rename_row)
+
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         separator.setStyleSheet("color: #333;")
@@ -458,6 +509,7 @@ class RoomSetupPanel(QWidget):
         outer.addWidget(splitter)
 
         self._selected_zone_index: Optional[int] = None
+        self._selected_drawer_index: Optional[int] = None
         self._selected_camera_index: Optional[int] = None
         self._selected_object_id: Optional[int] = None
         self._updating_camera_list = False
@@ -505,7 +557,9 @@ class RoomSetupPanel(QWidget):
     def _refresh_zone_list(self):
         self.zone_list.clear()
         for i, zone in enumerate(self.zones):
-            text = (f"{zone['name']}  "
+            drawer_count = len(zone.get("drawers", []))
+            tag = f", {drawer_count} drawers" if drawer_count else ""
+            text = (f"{zone['name']}{tag}  "
                     f"({zone['x1']:.1f},{zone['y1']:.1f}) -> ({zone['x2']:.1f},{zone['y2']:.1f})")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, i)
@@ -517,11 +571,13 @@ class RoomSetupPanel(QWidget):
         self.canvas.selected_index = index
         self.canvas.update()
         self.zone_rename_input.setText(self.zones[index]["name"])
+        self._refresh_drawer_list()
 
     def _on_zone_selected_in_canvas(self, index: int):
         self._selected_zone_index = index
         self.zone_list.setCurrentRow(index)
         self.zone_rename_input.setText(self.zones[index]["name"])
+        self._refresh_drawer_list()
 
     def _on_rename_zone(self):
         if self._selected_zone_index is None:
@@ -546,7 +602,96 @@ class RoomSetupPanel(QWidget):
         self.zone_rename_input.clear()
         self.canvas.set_zones(self.zones)
         self._refresh_zone_list()
+        self._refresh_drawer_list()
         self.status_label.setText(f"Deleted zone \"{removed['name']}\". Don't forget to Save Room.")
+
+    def _refresh_drawer_list(self):
+        self.drawer_list.clear()
+        self._selected_drawer_index = None
+        self.drawer_rename_input.clear()
+
+        if self._selected_zone_index is None:
+            self.drawer_count_input.blockSignals(True)
+            self.drawer_count_input.setValue(0)
+            self.drawer_count_input.blockSignals(False)
+            return
+
+        drawers = self.zones[self._selected_zone_index].get("drawers", [])
+        self.drawer_count_input.blockSignals(True)
+        self.drawer_count_input.setValue(len(drawers))
+        self.drawer_count_input.blockSignals(False)
+        for i, drawer in enumerate(drawers):
+            item = QListWidgetItem(drawer["name"])
+            item.setData(Qt.UserRole, i)
+            self.drawer_list.addItem(item)
+
+    def _on_set_drawers(self):
+        if self._selected_zone_index is None:
+            self.status_label.setText("Select a zone first (e.g. Dresser), then set its drawers.")
+            return
+
+        zone = self.zones[self._selected_zone_index]
+        count = self.drawer_count_input.value()
+
+        if count == 0:
+            zone["drawers"] = []
+            self.canvas.set_zones(self.zones)
+            self._refresh_drawer_list()
+            self._refresh_zone_list()
+            self.zone_list.setCurrentRow(self._selected_zone_index)
+            self.status_label.setText(f"Cleared drawers on \"{zone['name']}\". Don't forget to Save Room.")
+            return
+
+        stacked = self.drawer_orientation_input.currentIndex() == 0
+        x1, y1, x2, y2 = zone["x1"], zone["y1"], zone["x2"], zone["y2"]
+        drawers = []
+        if stacked:
+            step = (y2 - y1) / count
+            for i in range(count):
+                drawers.append({
+                    "name": f"Drawer {i + 1}",
+                    "x1": x1, "x2": x2,
+                    "y1": y1 + i * step, "y2": y1 + (i + 1) * step,
+                })
+        else:
+            step = (x2 - x1) / count
+            for i in range(count):
+                drawers.append({
+                    "name": f"Drawer {i + 1}",
+                    "x1": x1 + i * step, "x2": x1 + (i + 1) * step,
+                    "y1": y1, "y2": y2,
+                })
+
+        zone["drawers"] = drawers
+        self.canvas.set_zones(self.zones)
+        self._refresh_drawer_list()
+        self._refresh_zone_list()
+        self.zone_list.setCurrentRow(self._selected_zone_index)
+        self.status_label.setText(
+            f"Set {count} drawers on \"{zone['name']}\". Rename them below, then Save Room."
+        )
+
+    def _on_drawer_list_clicked(self, item: QListWidgetItem):
+        index = item.data(Qt.UserRole)
+        self._selected_drawer_index = index
+        zone = self.zones[self._selected_zone_index]
+        self.drawer_rename_input.setText(zone["drawers"][index]["name"])
+
+    def _on_rename_drawer(self):
+        if self._selected_zone_index is None or self._selected_drawer_index is None:
+            self.status_label.setText("Select a drawer to rename first.")
+            return
+        new_name = self.drawer_rename_input.text().strip()
+        if not new_name:
+            return
+        drawer_index = self._selected_drawer_index
+        zone = self.zones[self._selected_zone_index]
+        zone["drawers"][drawer_index]["name"] = new_name
+        self.canvas.set_zones(self.zones)
+        self._refresh_drawer_list()
+        self.drawer_list.setCurrentRow(drawer_index)
+        self._selected_drawer_index = drawer_index
+        self.status_label.setText(f"Renamed drawer to \"{new_name}\". Don't forget to Save Room.")
 
     def _on_save(self):
         self.room_config.width_m = self.width_input.value()
@@ -657,8 +802,11 @@ class RoomSetupPanel(QWidget):
         for item in items:
             label = item.get("label", "unknown")
             cam = item.get("camera_id", 0)
+            zone_name = item.get("zone_name")
             last_seen = (item.get("last_seen") or "")[:16]
             text = f"{label}  (cam {cam})"
+            if zone_name:
+                text += f"  in {zone_name}"
             if last_seen:
                 text += f"  - {last_seen}"
             list_item = QListWidgetItem(text)

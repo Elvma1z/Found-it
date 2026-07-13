@@ -103,6 +103,16 @@ class RoomMap(QWidget):
             painter.setFont(font)
             painter.drawText(zx1 + 4, zy1 + 12, zone.get("name", "Zone"))
 
+            for drawer in zone.get("drawers", []):
+                dx1, dy1 = self._room_to_pixel(drawer["x1"], drawer["y1"])
+                dx2, dy2 = self._room_to_pixel(drawer["x2"], drawer["y2"])
+                painter.setPen(QPen(QColor(255, 210, 90), 1, Qt.DotLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
+                painter.setPen(QPen(QColor(230, 215, 170), 1))
+                painter.setFont(QFont("Segoe UI", 6))
+                painter.drawText(dx1 + 3, dy1 + 10, drawer.get("name", "Drawer"))
+
         for cam in self.cameras:
             if not cam.get("enabled"):
                 continue

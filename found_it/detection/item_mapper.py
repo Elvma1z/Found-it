@@ -91,6 +91,10 @@ class ItemMapper:
         for zone in self.room.zones:
             if (zone["x1"] <= room_x <= zone["x2"] and
                     zone["y1"] <= room_y <= zone["y2"]):
+                for drawer in zone.get("drawers", []):
+                    if (drawer["x1"] <= room_x <= drawer["x2"] and
+                            drawer["y1"] <= room_y <= drawer["y2"]):
+                        return f"{drawer['name']} ({zone['name']})"
                 return zone["name"]
 
         rel_x = room_x / self.room.width_m

@@ -15,6 +15,7 @@ class DetectedItem:
     bbox_x2: int
     bbox_y2: int
     snapshot_path: Optional[str] = None
+    zone_name: Optional[str] = None
     first_seen: datetime = field(default_factory=datetime.now)
     last_seen: datetime = field(default_factory=datetime.now)
     is_active: bool = True

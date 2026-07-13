@@ -29,6 +29,7 @@ class Database:
                 bbox_y2 INTEGER,
                 confidence REAL,
                 snapshot_path TEXT,
+                zone_name TEXT,
                 first_seen TIMESTAMP,
                 last_seen TIMESTAMP,
                 is_active INTEGER DEFAULT 1
@@ -55,17 +56,21 @@ class Database:
                 "ALTER TABLE room_config ADD COLUMN center_camera_position TEXT DEFAULT 'center'"
             )
 
+        item_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(items)").fetchall()}
+        if "zone_name" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN zone_name TEXT")
+
         self.conn.commit()
 
     def insert_item(self, item: DetectedItem) -> int:
         cursor = self.conn.execute(
             """INSERT INTO items
                (label, camera_id, zone_x, zone_y, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
-                confidence, snapshot_path, first_seen, last_seen, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, snapshot_path, zone_name, first_seen, last_seen, is_active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (item.label, item.camera_id, item.zone_x, item.zone_y,
              item.bbox_x1, item.bbox_y1, item.bbox_x2, item.bbox_y2,
-             item.confidence, item.snapshot_path,
+             item.confidence, item.snapshot_path, item.zone_name,
              item.first_seen.isoformat(), item.last_seen.isoformat(),
              int(item.is_active))
         )
@@ -73,12 +78,12 @@ class Database:
         return cursor.lastrowid
 
     def update_item_position(self, item_id: int, zone_x: float, zone_y: float,
-                             confidence: float):
+                             confidence: float, zone_name: Optional[str] = None):
         self.conn.execute(
             """UPDATE items SET zone_x = ?, zone_y = ?, confidence = ?,
-               last_seen = ?, is_active = 1
+               zone_name = ?, last_seen = ?, is_active = 1
                WHERE id = ?""",
-            (zone_x, zone_y, confidence, datetime.now().isoformat(), item_id)
+            (zone_x, zone_y, confidence, zone_name, datetime.now().isoformat(), item_id)
         )
         self.conn.commit()
 

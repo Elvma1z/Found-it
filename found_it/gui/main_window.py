@@ -323,6 +323,11 @@ class MainWindow(QMainWindow):
         merged = self.mapper.merge_detections(all_detections_per_cam)
 
         for det in merged:
+            room_x, room_y = self.mapper.pixel_to_room(
+                det["zone_x"], det["zone_y"], det["camera_id"]
+            )
+            zone_name = self.mapper.get_zone_name(room_x, room_y)
+
             existing = self.db.find_matching_item(
                 det["label"], det["camera_id"],
                 det["zone_x"], det["zone_y"]
@@ -331,7 +336,7 @@ class MainWindow(QMainWindow):
             if existing:
                 self.db.update_item_position(
                     existing["id"], det["zone_x"], det["zone_y"],
-                    det["confidence"]
+                    det["confidence"], zone_name
                 )
             else:
                 item = DetectedItem(
@@ -345,6 +350,7 @@ class MainWindow(QMainWindow):
                     bbox_x2=det["bbox_x2"],
                     bbox_y2=det["bbox_y2"],
                     snapshot_path=det.get("snapshot_path"),
+                    zone_name=zone_name,
                 )
                 self.db.insert_item(item)
 

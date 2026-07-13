@@ -143,9 +143,12 @@ class SearchPanel(QWidget):
             conf = item.get("confidence", 0)
             cam = item.get("camera_id", 0)
             cam_label = CAMERA_LABELS.get(cam, f"cam{cam}")
+            zone_name = item.get("zone_name")
             last_seen = item.get("last_seen", "")[:16]
 
             text = f"{label}  ({cam_label}, {conf:.0%})"
+            if zone_name:
+                text += f"\n  In: {zone_name}"
             if last_seen:
                 text += f"\n  Last seen: {last_seen}"
 
@@ -158,6 +161,7 @@ class SearchPanel(QWidget):
         conf = item.get("confidence", 0)
         cam = item.get("camera_id", 0)
         cam_label = CAMERA_LABELS.get(cam, f"cam{cam}")
+        zone_name = item.get("zone_name") or "unmarked area"
         zx = item.get("zone_x", 0)
         zy = item.get("zone_y", 0)
         first = item.get("first_seen", "")[:16]
@@ -166,6 +170,7 @@ class SearchPanel(QWidget):
         details = (
             f"Item: {label}\n"
             f"Confidence: {conf:.1%}\n"
+            f"In: {zone_name}\n"
             f"Camera: {cam_label}\n"
             f"Position: ({zx:.2f}, {zy:.2f})\n"
             f"First seen: {first}\n"
