@@ -219,19 +219,31 @@ class RoomCanvas(QWidget):
         draw_h = self.height() - 2 * self._padding
         return draw_w, draw_h
 
-    def _px_to_m(self, px: int, py: int) -> Tuple[float, float]:
+    def _scale_and_offset(self) -> Tuple[float, float, float, float, float]:
+        """A single meters-to-pixels scale (not one per axis) so the room and
+        everything in it renders in true proportion instead of stretching to
+        fill the canvas - the room is letterboxed/centered within it instead."""
         draw_w, draw_h = self._draw_rect()
-        x = (px - self._padding) / draw_w * self.room_width if draw_w else 0
-        y = (py - self._padding) / draw_h * self.room_height if draw_h else 0
+        if self.room_width <= 0 or self.room_height <= 0 or draw_w <= 0 or draw_h <= 0:
+            return 1.0, float(self._padding), float(self._padding), float(max(draw_w, 0)), float(max(draw_h, 0))
+        scale = min(draw_w / self.room_width, draw_h / self.room_height)
+        room_px_w = self.room_width * scale
+        room_px_h = self.room_height * scale
+        ox = self._padding + (draw_w - room_px_w) / 2.0
+        oy = self._padding + (draw_h - room_px_h) / 2.0
+        return scale, ox, oy, room_px_w, room_px_h
+
+    def _px_to_m(self, px: int, py: int) -> Tuple[float, float]:
+        scale, ox, oy, _, _ = self._scale_and_offset()
+        x = (px - ox) / scale if scale else 0.0
+        y = (py - oy) / scale if scale else 0.0
         x = max(0.0, min(self.room_width, x))
         y = max(0.0, min(self.room_height, y))
         return x, y
 
     def _m_to_px(self, x: float, y: float) -> Tuple[int, int]:
-        draw_w, draw_h = self._draw_rect()
-        px = self._padding + int(x / self.room_width * draw_w)
-        py = self._padding + int(y / self.room_height * draw_h)
-        return px, py
+        scale, ox, oy, _, _ = self._scale_and_offset()
+        return int(ox + x * scale), int(oy + y * scale)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -355,18 +367,19 @@ class RoomCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        draw_w, draw_h = self._draw_rect()
+        _, ox, oy, room_px_w, room_px_h = self._scale_and_offset()
+        ox, oy, room_px_w, room_px_h = int(ox), int(oy), int(room_px_w), int(room_px_h)
 
         painter.setPen(QPen(QColor(60, 60, 80), 2))
         painter.setBrush(QBrush(QColor(20, 20, 35)))
-        painter.drawRoundedRect(self._padding, self._padding, draw_w, draw_h, 6, 6)
+        painter.drawRoundedRect(ox, oy, room_px_w, room_px_h, 6, 6)
 
         painter.setPen(QPen(QColor(80, 80, 100), 1, Qt.DashLine))
         for i in range(1, 4):
-            x = self._padding + int(draw_w * i / 4)
-            painter.drawLine(x, self._padding, x, self._padding + draw_h)
-            y = self._padding + int(draw_h * i / 4)
-            painter.drawLine(self._padding, y, self._padding + draw_w, y)
+            x = ox + int(room_px_w * i / 4)
+            painter.drawLine(x, oy, x, oy + room_px_h)
+            y = oy + int(room_px_h * i / 4)
+            painter.drawLine(ox, y, ox + room_px_w, y)
 
         for i, zone in enumerate(self.zones):
             x1, y1 = self._m_to_px(zone["x1"], zone["y1"])
