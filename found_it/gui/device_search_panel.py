@@ -1,6 +1,7 @@
 import os
 import platform
 import subprocess
+from typing import Optional
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
@@ -55,7 +56,7 @@ class DeviceSearchPanel(QWidget):
             }
             QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
         """)
-        self.connect_btn.clicked.connect(self._connect_device)
+        self.connect_btn.clicked.connect(lambda: self._do_connect())
         conn_row.addWidget(self.connect_btn)
 
         self.scan_btn = QPushButton("Scan Device")
@@ -198,7 +199,7 @@ class DeviceSearchPanel(QWidget):
             self.adb_status.setText("ADB: Not found — install Android platform-tools")
             self.adb_status.setStyleSheet("color: #e53935; font-size: 12px;")
 
-    def _connect_device(self):
+    def _do_connect(self, serial: Optional[str] = None):
         self.status_label.setText("Looking for devices...")
         self.connect_btn.setEnabled(False)
 
@@ -210,7 +211,7 @@ class DeviceSearchPanel(QWidget):
             self.connect_btn.setEnabled(True)
             return
 
-        if self.scanner.connect():
+        if self.scanner.connect(serial):
             name = self.scanner.get_device_name()
             self.device_label.setText(f"Connected: {name}")
             self.scan_btn.setEnabled(True)
@@ -219,12 +220,18 @@ class DeviceSearchPanel(QWidget):
             self.status_label.setText("Device connected. Click Scan to index files.")
         else:
             self.status_label.setText(
-                "No device found.\n"
+                "No matching device found.\n"
                 "1. Connect your device via USB-C\n"
                 "2. Enable USB debugging (Settings > Developer Options)\n"
                 "3. Accept the debugging prompt on your device"
             )
             self.connect_btn.setEnabled(True)
+
+    def connect_saved_device(self, serial: str):
+        self._do_connect(serial)
+
+    def get_connected_serial(self) -> Optional[str]:
+        return self.scanner.get_connected_serial()
 
     def _start_scan(self):
         if not self.scanner.is_connected():

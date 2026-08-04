@@ -91,10 +91,16 @@ class ADBHandler:
 
         return devices
 
-    def connect_device(self) -> bool:
+    def connect_device(self, serial: Optional[str] = None) -> bool:
         devices = self.get_devices()
         if not devices:
             return False
+        if serial:
+            match = next((d for d in devices if d.serial == serial), None)
+            if not match:
+                return False
+            self.connected_device = match
+            return True
         self.connected_device = devices[0]
         return True
 

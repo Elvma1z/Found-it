@@ -2,6 +2,8 @@
 from datetime import datetime
 from typing import Optional
 
+from found_it.config import DETECTION_CONFIDENCE, DETECTION_FRAME_SKIP, DEWARP_ENABLED
+
 
 @dataclass
 class DetectedItem:
@@ -43,3 +45,10 @@ class RoomConfig:
     height_m: float = 4.0
     cameras: list = field(default_factory=default_cameras)
     zones: list = field(default_factory=list)
+
+
+@dataclass
+class AppSettings:
+    detection_confidence: float = DETECTION_CONFIDENCE
+    detection_frame_skip: int = DETECTION_FRAME_SKIP
+    dewarp_default: bool = DEWARP_ENABLED

@@ -9,6 +9,25 @@ from typing import List, Optional, Tuple
 
 from found_it.utils.room_config import load_room_config, save_room_config
 from found_it.storage.database import Database
+from found_it.storage.models import RoomConfig
+from found_it.detection.item_mapper import ItemMapper
+
+# Real-world footprints (width_m, depth_m) for COCO labels worth auto-placing
+# as a zone when detected. Camera detections can't measure true size, so
+# these are reasonable defaults the user can still resize/move by hand.
+FURNITURE_SIZES_M = {
+    "bed": (1.6, 2.0),
+    "couch": (1.8, 0.9),
+    "chair": (0.5, 0.5),
+    "dining table": (1.2, 0.8),
+    "tv": (1.1, 0.15),
+    "refrigerator": (0.7, 0.7),
+    "sink": (0.6, 0.5),
+    "toilet": (0.4, 0.6),
+    "oven": (0.6, 0.6),
+    "microwave": (0.5, 0.4),
+    "potted plant": (0.4, 0.4),
+}
 
 INPUT_STYLE = """
     QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {
@@ -97,6 +116,33 @@ def _remap_drawers(drawers: List[dict], old_x1: float, old_y1: float, old_x2: fl
     return remapped
 
 
+def _rotate_drawers_cw(drawers: List[dict], old_x1: float, old_y1: float, old_x2: float, old_y2: float,
+                        new_x1: float, new_y1: float, new_x2: float, new_y2: float) -> List[dict]:
+    """Rotate drawer rectangles 90 degrees clockwise along with their parent zone,
+    instead of stretching them to fit the new (swapped) bounding box."""
+    old_w = (old_x2 - old_x1) or 1.0
+    old_h = (old_y2 - old_y1) or 1.0
+    new_w = new_x2 - new_x1
+    new_h = new_y2 - new_y1
+    remapped = []
+    for d in drawers:
+        rx1 = (d["x1"] - old_x1) / old_w
+        ry1 = (d["y1"] - old_y1) / old_h
+        rx2 = (d["x2"] - old_x1) / old_w
+        ry2 = (d["y2"] - old_y1) / old_h
+        # 90 deg clockwise: (rx, ry) -> (1 - ry, rx)
+        nrx1, nry1 = 1.0 - ry1, rx1
+        nrx2, nry2 = 1.0 - ry2, rx2
+        remapped.append({
+            "name": d["name"],
+            "x1": new_x1 + min(nrx1, nrx2) * new_w,
+            "x2": new_x1 + max(nrx1, nrx2) * new_w,
+            "y1": new_y1 + min(nry1, nry2) * new_h,
+            "y2": new_y1 + max(nry1, nry2) * new_h,
+        })
+    return remapped
+
+
 def _clamp_axis(a1: float, a2: float, room_size: float) -> Tuple[float, float]:
     """Slide a span [a1, a2] to stay within [0, room_size] without ever changing its size."""
     size = a2 - a1
@@ -116,12 +162,17 @@ class RoomCanvas(QWidget):
     zone_drag_finished = pyqtSignal()
     camera_moved = pyqtSignal(int, float, float)
     camera_drag_finished = pyqtSignal()
+    delete_requested = pyqtSignal()
+    rotate_requested = pyqtSignal()
 
     CAMERA_HIT_RADIUS_PX = 12
+    CORNER_HANDLE_RADIUS_PX = 7
+    MIN_ZONE_SIZE_M = 0.1
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(320, 320)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.room_width = 4.0
         self.room_height = 4.0
         self.zones: List[dict] = []
@@ -135,7 +186,13 @@ class RoomCanvas(QWidget):
         self._zone_drag_start_mouse: Optional[Tuple[float, float]] = None
         self._zone_drag_start_bounds: Optional[Tuple[float, float, float, float]] = None
         self._zone_drag_start_drawers: Optional[List[dict]] = None
+        self._resizing_zone_index: Optional[int] = None
+        self._resize_start_bounds: Optional[Tuple[float, float, float, float]] = None
+        self._resize_start_drawers: Optional[List[dict]] = None
         self._padding = 30
+
+    def _corner_handle_px(self, zone: dict) -> Tuple[int, int]:
+        return self._m_to_px(zone["x1"], zone["y1"])
 
     def set_room_size(self, width: float, height: float):
         self.room_width = max(width, 0.1)
@@ -185,6 +242,17 @@ class RoomCanvas(QWidget):
             self.update()
             return
 
+        if self.selected_index is not None and self.selected_index < len(self.zones):
+            zone = self.zones[self.selected_index]
+            hx, hy = self._corner_handle_px(zone)
+            if (event.x() - hx) ** 2 + (event.y() - hy) ** 2 <= self.CORNER_HANDLE_RADIUS_PX ** 2:
+                self._resizing_zone_index = self.selected_index
+                self._resize_start_bounds = (zone["x1"], zone["y1"], zone["x2"], zone["y2"])
+                self._resize_start_drawers = [dict(d) for d in zone.get("drawers", [])]
+                self.setFocus()
+                self.update()
+                return
+
         for i, cam in enumerate(self.cameras):
             cx, cy = self._m_to_px(cam.get("x", 0), cam.get("y", 0))
             if (event.x() - cx) ** 2 + (event.y() - cy) ** 2 <= self.CAMERA_HIT_RADIUS_PX ** 2:
@@ -201,12 +269,28 @@ class RoomCanvas(QWidget):
                 self._zone_drag_start_mouse = (mx, my)
                 self._zone_drag_start_bounds = (z["x1"], z["y1"], z["x2"], z["y2"])
                 self._zone_drag_start_drawers = [dict(d) for d in z.get("drawers", [])]
+                self.setFocus()
                 self.update()
                 return
         self.selected_index = None
+        self.setFocus()
         self.update()
 
     def mouseMoveEvent(self, event):
+        if self._resizing_zone_index is not None:
+            mx, my = self._px_to_m(event.x(), event.y())
+            ox1, oy1, ox2, oy2 = self._resize_start_bounds
+            nx1 = max(0.0, min(mx, ox2 - self.MIN_ZONE_SIZE_M))
+            ny1 = max(0.0, min(my, oy2 - self.MIN_ZONE_SIZE_M))
+
+            zone = self.zones[self._resizing_zone_index]
+            zone["x1"], zone["y1"], zone["x2"], zone["y2"] = nx1, ny1, ox2, oy2
+            if self._resize_start_drawers:
+                zone["drawers"] = _remap_drawers(
+                    self._resize_start_drawers, ox1, oy1, ox2, oy2, nx1, ny1, ox2, oy2
+                )
+            self.update()
+            return
         if self._dragging_camera_index is not None:
             mx, my = self._px_to_m(event.x(), event.y())
             cam = self.cameras[self._dragging_camera_index]
@@ -239,6 +323,12 @@ class RoomCanvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
+            return
+        if self._resizing_zone_index is not None:
+            self._resizing_zone_index = None
+            self._resize_start_bounds = None
+            self._resize_start_drawers = None
+            self.zone_drag_finished.emit()
             return
         if self._dragging_camera_index is not None:
             self._dragging_camera_index = None
@@ -301,6 +391,14 @@ class RoomCanvas(QWidget):
                 painter.setFont(QFont("Segoe UI", 6))
                 painter.drawText(dx1 + 3, dy1 + 11, drawer.get("name", "Drawer"))
 
+        if self.selected_index is not None and self.selected_index < len(self.zones):
+            handle_zone = self.zones[self.selected_index]
+            hx, hy = self._corner_handle_px(handle_zone)
+            r = self.CORNER_HANDLE_RADIUS_PX
+            painter.setPen(QPen(QColor(255, 210, 90), 2))
+            painter.setBrush(QBrush(QColor(255, 210, 90)))
+            painter.drawRect(hx - r, hy - r, r * 2, r * 2)
+
         if self.draw_mode and self._drag_start and self._drag_current:
             x1, y1 = self._m_to_px(*self._drag_start)
             x2, y2 = self._m_to_px(*self._drag_current)
@@ -322,6 +420,21 @@ class RoomCanvas(QWidget):
             painter.drawText(cx + 12, cy + 4, cam.get("label", f"Camera {cam.get('id', 0)}"))
 
         painter.end()
+
+    def keyPressEvent(self, event):
+        if self.selected_index is None or self.selected_index >= len(self.zones):
+            super().keyPressEvent(event)
+            return
+
+        if event.key() == Qt.Key_Delete and event.modifiers() == Qt.NoModifier:
+            self.delete_requested.emit()
+            return
+
+        if event.key() == Qt.Key_R and event.modifiers() == Qt.ControlModifier:
+            self.rotate_requested.emit()
+            return
+
+        super().keyPressEvent(event)
 
 
 class RoomSetupPanel(QWidget):
@@ -387,6 +500,8 @@ class RoomSetupPanel(QWidget):
         self.canvas.zone_drag_finished.connect(self._on_zone_drag_finished)
         self.canvas.camera_moved.connect(self._on_camera_moved)
         self.canvas.camera_drag_finished.connect(self._on_camera_drag_finished)
+        self.canvas.delete_requested.connect(self._on_delete_zone)
+        self.canvas.rotate_requested.connect(self._on_rotate_zone)
         left_layout.addWidget(self.canvas)
 
         self.status_label = QLabel("")
@@ -462,10 +577,23 @@ class RoomSetupPanel(QWidget):
 
         right_layout.addWidget(self._label("Zones / Furniture"))
 
-        zones_hint = QLabel("Drag a zone on the room to move it. Select one and rotate it 90° at a time to match how the furniture actually sits.")
+        zones_hint = QLabel("Drag a zone on the room to move it, or drag its top-left corner handle to resize it. "
+                             "With a zone selected: Delete removes it, Ctrl+R rotates it 90°.")
         zones_hint.setStyleSheet("color: #666; font-size: 10px;")
         zones_hint.setWordWrap(True)
         right_layout.addWidget(zones_hint)
+
+        scan_row = QHBoxLayout()
+        self.scan_room_btn = QPushButton("Scan Room with Cameras")
+        self.scan_room_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.scan_room_btn.clicked.connect(self._on_scan_room)
+        scan_row.addWidget(self.scan_room_btn)
+        right_layout.addLayout(scan_row)
+
+        scan_hint = QLabel("Auto-creates zones for furniture the cameras currently recognize (bed, couch, chair, TV, etc.) at their mapped position. Sizes are estimates since a camera can't measure true dimensions - reposition/resize by hand afterward. Add cameras and enable them first.")
+        scan_hint.setStyleSheet("color: #666; font-size: 10px;")
+        scan_hint.setWordWrap(True)
+        right_layout.addWidget(scan_hint)
 
         add_row = QHBoxLayout()
         self.zone_name_input = QLineEdit()
@@ -632,6 +760,55 @@ class RoomSetupPanel(QWidget):
         self.canvas.set_draw_mode(False)
         self.status_label.setText(f"Added zone \"{name}\". Don't forget to Save Room.")
 
+    def _on_scan_room(self):
+        db = Database()
+        active_items = db.get_active_items()
+        db.close()
+
+        temp_config = RoomConfig(
+            width_m=self.width_input.value(),
+            height_m=self.height_input.value(),
+            cameras=self.cameras,
+            zones=self.zones,
+        )
+        mapper = ItemMapper(temp_config)
+        room_w, room_h = temp_config.width_m, temp_config.height_m
+
+        added, updated = 0, 0
+        for det in active_items:
+            label = (det.get("label") or "").strip().lower()
+            size = FURNITURE_SIZES_M.get(label)
+            if size is None:
+                continue
+
+            room_x, room_y = mapper.pixel_to_room(det["zone_x"], det["zone_y"], det["camera_id"])
+            half_w, half_h = size[0] / 2.0, size[1] / 2.0
+            x1, x2 = _clamp_axis(room_x - half_w, room_x + half_w, room_w)
+            y1, y2 = _clamp_axis(room_y - half_h, room_y + half_h, room_h)
+
+            zone_name = "TV" if label == "tv" else label.title()
+            existing = next((z for z in self.zones if z["name"].lower() == zone_name.lower()), None)
+            if existing:
+                existing["x1"], existing["y1"], existing["x2"], existing["y2"] = x1, y1, x2, y2
+                updated += 1
+            else:
+                self.zones.append({"name": zone_name, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                added += 1
+
+        self.canvas.set_zones(self.zones)
+        self._refresh_zone_list()
+
+        if added or updated:
+            self.status_label.setText(
+                f"Scanned room: added {added}, updated {updated} zone(s) from what the cameras "
+                "can currently see. Don't forget to Save Room."
+            )
+        else:
+            self.status_label.setText(
+                "No recognizable furniture currently in camera view. Make sure cameras are "
+                "added, enabled, and pointed at the room, then try again."
+            )
+
     def _refresh_zone_list(self):
         self.zone_list.clear()
         for i, zone in enumerate(self.zones):
@@ -661,7 +838,7 @@ class RoomSetupPanel(QWidget):
         self._refresh_zone_list()
         if self._selected_zone_index is not None:
             self.zone_list.setCurrentRow(self._selected_zone_index)
-        self.status_label.setText("Moved zone. Don't forget to Save Room.")
+        self.status_label.setText("Updated zone. Don't forget to Save Room.")
 
     def _on_rename_zone(self):
         if self._selected_zone_index is None:
@@ -691,7 +868,7 @@ class RoomSetupPanel(QWidget):
         nx1, nx2 = _clamp_axis(cx - half_h, cx + half_h, room_w)
         ny1, ny2 = _clamp_axis(cy - half_w, cy + half_w, room_h)
 
-        zone["drawers"] = _remap_drawers(zone.get("drawers", []), x1, y1, x2, y2, nx1, ny1, nx2, ny2)
+        zone["drawers"] = _rotate_drawers_cw(zone.get("drawers", []), x1, y1, x2, y2, nx1, ny1, nx2, ny2)
         zone["x1"], zone["y1"], zone["x2"], zone["y2"] = nx1, ny1, nx2, ny2
 
         self.canvas.set_zones(self.zones)

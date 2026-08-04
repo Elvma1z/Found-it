@@ -44,11 +44,17 @@ class DeviceScanner:
     def is_adb_available(self) -> bool:
         return self.adb.is_available()
 
-    def connect(self) -> bool:
-        return self.adb.connect_device()
+    def connect(self, serial: Optional[str] = None) -> bool:
+        return self.adb.connect_device(serial)
+
+    def list_devices(self):
+        return self.adb.get_devices()
 
     def get_device_name(self) -> str:
         return self.adb.get_device_model()
+
+    def get_connected_serial(self) -> Optional[str]:
+        return self.adb.connected_device.serial if self.adb.connected_device else None
 
     def is_connected(self) -> bool:
         return self.adb.connected_device is not None

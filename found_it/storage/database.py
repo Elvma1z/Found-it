@@ -118,6 +118,14 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def count_items(self) -> int:
+        cursor = self.conn.execute("SELECT COUNT(*) FROM items")
+        return cursor.fetchone()[0]
+
+    def clear_all_items(self):
+        self.conn.execute("DELETE FROM items")
+        self.conn.commit()
+
     def get_recent_items(self, limit: int = 50) -> list[dict]:
         cursor = self.conn.execute(
             """SELECT * FROM items ORDER BY last_seen DESC LIMIT ?""",

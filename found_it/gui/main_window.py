@@ -6,7 +6,7 @@
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
-from found_it.config import DETECTION_FRAME_SKIP, DEWARP_ENABLED, ITEM_INACTIVE_SECONDS
+from found_it.config import ITEM_INACTIVE_SECONDS
 from found_it.camera.capture import CameraCapture
 from found_it.camera.dewarp import FisheyeDewarp, EquirectangularDewarp
 from found_it.detection.detector import ItemDetector
@@ -14,12 +14,14 @@ from found_it.detection.item_mapper import ItemMapper
 from found_it.storage.database import Database
 from found_it.storage.models import DetectedItem, RoomConfig
 from found_it.utils.room_config import load_room_config
+from found_it.utils.app_settings import load_app_settings
 from found_it.gui.camera_view import CameraView
 from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.file_search_panel import FileSearchPanel
 from found_it.gui.device_search_panel import DeviceSearchPanel
 from found_it.gui.room_setup_panel import RoomSetupPanel
+from found_it.gui.settings_panel import SettingsPanel
 
 
 class MainWindow(QMainWindow):
@@ -30,6 +32,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 800)
 
         self.room_config = load_room_config()
+        self.app_settings = load_app_settings()
         self.db = Database()
         self.detector = ItemDetector()
         self.mapper = ItemMapper(self.room_config)
@@ -120,6 +123,23 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.mode_device_btn)
 
         nav_layout.addStretch()
+
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setCheckable(True)
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setFixedWidth(36)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #888; border: none;
+                padding: 8px; font-size: 16px; font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
+            QPushButton:hover { color: #ccc; }
+        """)
+        self.settings_btn.clicked.connect(lambda: self._switch_mode("settings"))
+        nav_layout.addWidget(self.settings_btn)
+
         main_layout.addWidget(nav_bar)
 
         self.content_stack = QWidget()
@@ -132,15 +152,20 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.room_updated.connect(self._on_room_updated)
         self.file_search_panel = FileSearchPanel()
         self.device_search_panel = DeviceSearchPanel()
+        self.settings_panel = SettingsPanel()
+        self.settings_panel.settings_updated.connect(self._on_settings_updated)
+        self.settings_panel.connect_device_requested.connect(self._on_connect_saved_device)
 
         self.content_layout.addWidget(self.room_widget)
         self.content_layout.addWidget(self.room_setup_panel)
         self.content_layout.addWidget(self.file_search_panel)
         self.content_layout.addWidget(self.device_search_panel)
+        self.content_layout.addWidget(self.settings_panel)
 
         self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
+        self.settings_panel.hide()
 
         main_layout.addWidget(self.content_stack)
 
@@ -164,7 +189,7 @@ class MainWindow(QMainWindow):
 
         controls = QHBoxLayout()
         self.dewarp_check = QCheckBox("Dewarp")
-        self.dewarp_check.setChecked(DEWARP_ENABLED)
+        self.dewarp_check.setChecked(self.app_settings.dewarp_default)
         self.dewarp_check.setStyleSheet("color: #aaa;")
         controls.addWidget(self.dewarp_check)
         controls.addStretch()
@@ -221,10 +246,12 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
+        self.settings_panel.hide()
         self.mode_room_btn.setChecked(False)
         self.mode_room_setup_btn.setChecked(False)
         self.mode_file_btn.setChecked(False)
         self.mode_device_btn.setChecked(False)
+        self.settings_btn.setChecked(False)
 
         if mode == "room":
             self.room_widget.show()
@@ -238,6 +265,18 @@ class MainWindow(QMainWindow):
         elif mode == "device":
             self.device_search_panel.show()
             self.mode_device_btn.setChecked(True)
+        elif mode == "settings":
+            self.settings_panel.show()
+            self.settings_btn.setChecked(True)
+
+    def _on_settings_updated(self):
+        self.app_settings = load_app_settings()
+        self.dewarp_check.setChecked(self.app_settings.dewarp_default)
+        self._apply_camera_config()
+
+    def _on_connect_saved_device(self, serial: str):
+        self._switch_mode("device")
+        self.device_search_panel.connect_saved_device(serial)
 
     def _on_room_updated(self):
         self.room_config = load_room_config()
@@ -292,7 +331,7 @@ class MainWindow(QMainWindow):
 
             if cam_cfg.get("is_360"):
                 self.dewarpers[cam_id] = EquirectangularDewarp(fov=90.0, num_views=4)
-            elif DEWARP_ENABLED:
+            elif self.app_settings.dewarp_default:
                 dewarper = FisheyeDewarp(cam_id)
                 frame = cam.get_frame()
                 if frame is not None:
@@ -304,7 +343,7 @@ class MainWindow(QMainWindow):
 
     def _detection_cycle(self):
         self._frame_count += 1
-        if self._frame_count % DETECTION_FRAME_SKIP != 0:
+        if self._frame_count % self.app_settings.detection_frame_skip != 0:
             return
 
         all_detections_per_cam = []
@@ -317,7 +356,7 @@ class MainWindow(QMainWindow):
             if self.dewarp_check.isChecked() and cam_id in self.dewarpers:
                 frame = self.dewarpers[cam_id].dewarp(frame)
 
-            detections = self.detector.detect(frame, cam_id)
+            detections = self.detector.detect(frame, cam_id, confidence=self.app_settings.detection_confidence)
             all_detections_per_cam.append(detections)
 
         merged = self.mapper.merge_detections(all_detections_per_cam)
