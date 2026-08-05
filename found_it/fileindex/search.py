@@ -1,3 +1,4 @@
+import os
 import threading
 from typing import List, Optional, Callable
 from dataclasses import dataclass
@@ -92,18 +93,58 @@ class FileSearchEngine:
         if self._done_cb:
             self._done_cb(len(self.store))
 
+    def add_named_image(self, path: str, name: str,
+                        done_callback: Optional[Callable] = None):
+        """Embed a single, user-picked image under a custom name so it can be
+        found again quickly by typing that name, without needing to re-scan
+        whatever folder it happens to live in."""
+        def worker():
+            embedding = self.store.embed_image(path)
+            if embedding is not None:
+                size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
+                self.store.add(FileEmbedding(
+                    path=path,
+                    name=name,
+                    embedding=embedding,
+                    file_type="image",
+                    text_preview="",
+                    size_bytes=size_bytes,
+                ))
+            if done_callback:
+                done_callback(embedding is not None, name)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def search(self, query: str, top_k: int = 20) -> List[SearchResult]:
         if not query.strip():
             return []
 
+        query_lower = query.strip().lower()
+        name_matches = [e for e in self.store.embeddings if query_lower in e.name.lower()]
+
         query_embedding = self.store.embed_query(query)
-        if query_embedding is None:
-            return []
+        semantic_results = self.store.search(query_embedding, top_k=top_k) if query_embedding is not None else []
 
-        results = self.store.search(query_embedding, top_k=top_k)
-
+        seen_paths = set()
         search_results = []
-        for file_emb, score in results:
+
+        for file_emb in name_matches:
+            if file_emb.path in seen_paths:
+                continue
+            seen_paths.add(file_emb.path)
+            search_results.append(SearchResult(
+                path=file_emb.path,
+                name=file_emb.name,
+                score=1.0,
+                file_type=file_emb.file_type,
+                text_preview=file_emb.text_preview,
+                size_bytes=file_emb.size_bytes,
+            ))
+
+        for file_emb, score in semantic_results:
+            if file_emb.path in seen_paths:
+                continue
+            seen_paths.add(file_emb.path)
             search_results.append(SearchResult(
                 path=file_emb.path,
                 name=file_emb.name,
@@ -113,7 +154,7 @@ class FileSearchEngine:
                 size_bytes=file_emb.size_bytes,
             ))
 
-        return search_results
+        return search_results[:top_k]
 
     def is_indexing(self) -> bool:
         return self._indexing or self.indexer.is_scanning()

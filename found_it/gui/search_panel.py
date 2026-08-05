@@ -17,7 +17,12 @@ class SearchPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(280)
         self.setMaximumWidth(400)
+        self._room_names: dict = {}
         self._setup_ui()
+
+    def set_room_names(self, room_names: dict):
+        """room_id -> room name, so results can show which tracked room an item was found in."""
+        self._room_names = room_names
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -143,10 +148,13 @@ class SearchPanel(QWidget):
             conf = item.get("confidence", 0)
             cam = item.get("camera_id", 0)
             cam_label = CAMERA_LABELS.get(cam, f"cam{cam}")
+            room_name = self._room_names.get(item.get("room_id"), item.get("room_id"))
             zone_name = item.get("zone_name")
             last_seen = item.get("last_seen", "")[:16]
 
             text = f"{label}  ({cam_label}, {conf:.0%})"
+            if room_name:
+                text += f"\n  Room: {room_name}"
             if zone_name:
                 text += f"\n  In: {zone_name}"
             if last_seen:
@@ -161,6 +169,7 @@ class SearchPanel(QWidget):
         conf = item.get("confidence", 0)
         cam = item.get("camera_id", 0)
         cam_label = CAMERA_LABELS.get(cam, f"cam{cam}")
+        room_name = self._room_names.get(item.get("room_id"), item.get("room_id") or "unknown room")
         zone_name = item.get("zone_name") or "unmarked area"
         zx = item.get("zone_x", 0)
         zy = item.get("zone_y", 0)
@@ -170,6 +179,7 @@ class SearchPanel(QWidget):
         details = (
             f"Item: {label}\n"
             f"Confidence: {conf:.1%}\n"
+            f"Room: {room_name}\n"
             f"In: {zone_name}\n"
             f"Camera: {cam_label}\n"
             f"Position: ({zx:.2f}, {zy:.2f})\n"

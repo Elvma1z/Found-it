@@ -18,6 +18,7 @@ class DetectedItem:
     bbox_y2: int
     snapshot_path: Optional[str] = None
     zone_name: Optional[str] = None
+    room_id: str = "main"
     first_seen: datetime = field(default_factory=datetime.now)
     last_seen: datetime = field(default_factory=datetime.now)
     is_active: bool = True
@@ -41,6 +42,8 @@ def default_cameras() -> list:
 
 @dataclass
 class RoomConfig:
+    id: str = "main"
+    name: str = "Main Room"
     width_m: float = 4.0
     height_m: float = 4.0
     cameras: list = field(default_factory=default_cameras)
@@ -52,3 +55,5 @@ class AppSettings:
     detection_confidence: float = DETECTION_CONFIDENCE
     detection_frame_skip: int = DETECTION_FRAME_SKIP
     dewarp_default: bool = DEWARP_ENABLED
+    active_room_id: str = "main"
+    room_tracker_layout: str = ""

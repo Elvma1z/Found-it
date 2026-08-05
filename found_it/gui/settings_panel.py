@@ -1,19 +1,21 @@
+import json
 import os
+import uuid
 from typing import Optional
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QStackedWidget, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox,
-    QLineEdit, QFrame, QMessageBox
+    QLineEdit, QFrame, QMessageBox, QFileDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from found_it.config import DATA_DIR, DB_PATH, SNAPSHOTS_DIR
 from found_it.storage.database import Database
-from found_it.storage.models import AppSettings
 from found_it.utils.app_settings import load_app_settings, save_app_settings
 from found_it.utils.saved_devices import load_saved_devices, save_saved_devices
+from found_it.utils.room_profiles import load_room_profiles, save_room_profiles, profile_from_dict, profiles_to_list
 from found_it.device.adb_handler import ADBHandler
 from found_it.gui.room_setup_panel import INPUT_STYLE, BUTTON_STYLE, SECONDARY_BUTTON_STYLE, LIST_STYLE
 
@@ -36,6 +38,7 @@ class SettingsPanel(QWidget):
 
     settings_updated = pyqtSignal()
     connect_device_requested = pyqtSignal(str)
+    rooms_imported = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -166,11 +169,9 @@ class SettingsPanel(QWidget):
         return page
 
     def _on_save_camera_settings(self):
-        self.app_settings = AppSettings(
-            detection_confidence=self.confidence_input.value(),
-            detection_frame_skip=self.frame_skip_input.value(),
-            dewarp_default=self.dewarp_default_check.isChecked(),
-        )
+        self.app_settings.detection_confidence = self.confidence_input.value()
+        self.app_settings.detection_frame_skip = self.frame_skip_input.value()
+        self.app_settings.dewarp_default = self.dewarp_default_check.isChecked()
         save_app_settings(self.app_settings)
         self.camera_status_label.setText("Saved. Applies immediately.")
         self.settings_updated.emit()
@@ -214,6 +215,33 @@ class SettingsPanel(QWidget):
         clear_snapshots_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
         clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
         layout.addWidget(clear_snapshots_btn)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet("color: #333;")
+        layout.addWidget(sep2)
+
+        room_data_hint = QLabel(
+            "Room data (every saved room's size, zones, and cameras) is always kept in "
+            "data/room_profiles.json. Export it to a .json file as a backup or to move your "
+            "rooms to another computer; import adds the rooms from a file without touching "
+            "what you already have."
+        )
+        room_data_hint.setStyleSheet("color: #666; font-size: 10px;")
+        room_data_hint.setWordWrap(True)
+        layout.addWidget(room_data_hint)
+
+        room_data_row = QHBoxLayout()
+        export_rooms_btn = QPushButton("Export Room Data...")
+        export_rooms_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        export_rooms_btn.clicked.connect(self._on_export_rooms)
+        room_data_row.addWidget(export_rooms_btn)
+
+        import_rooms_btn = QPushButton("Import Room Data...")
+        import_rooms_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        import_rooms_btn.clicked.connect(self._on_import_rooms)
+        room_data_row.addWidget(import_rooms_btn)
+        layout.addLayout(room_data_row)
 
         layout.addStretch()
 
@@ -276,6 +304,60 @@ class SettingsPanel(QWidget):
                         pass
         self._refresh_data_stats()
         self.data_status_label.setText(f"Deleted {deleted} snapshot(s).")
+
+    def _on_export_rooms(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Room Data", "found_it_rooms.json", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            profiles = load_room_profiles()
+            with open(path, "w") as f:
+                json.dump(profiles_to_list(profiles), f, indent=2)
+            self.data_status_label.setText(f"Exported {len(profiles)} room(s) to {path}.")
+        except OSError as e:
+            self.data_status_label.setText(f"Couldn't export: {e}")
+
+    def _on_import_rooms(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Room Data", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            imported = [profile_from_dict(p) for p in data]
+        except (OSError, ValueError) as e:
+            self.data_status_label.setText(f"Couldn't read that file: {e}")
+            return
+
+        if not imported:
+            self.data_status_label.setText("That file has no rooms in it.")
+            return
+
+        existing = load_room_profiles()
+        existing_ids = {p.id for p in existing}
+        existing_names = {p.name for p in existing}
+
+        for profile in imported:
+            if profile.id in existing_ids:
+                profile.id = uuid.uuid4().hex[:8]
+            name = profile.name
+            suffix = 2
+            while name in existing_names:
+                name = f"{profile.name} ({suffix})"
+                suffix += 1
+            profile.name = name
+            existing_ids.add(profile.id)
+            existing_names.add(name)
+            existing.append(profile)
+
+        save_room_profiles(existing)
+        self.data_status_label.setText(f"Imported {len(imported)} room(s) as new profiles.")
+        self.rooms_imported.emit()
 
     # ---------------- Saved Devices page ----------------
 

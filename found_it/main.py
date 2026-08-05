@@ -10,6 +10,7 @@ import torch  # noqa: F401
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 
+from found_it.gui.splash import create_splash_screen, splash_show_message
 from found_it.gui.main_window import MainWindow
 
 
@@ -29,7 +30,14 @@ def main():
         }
     """)
 
+    splash = create_splash_screen()
+    splash.show()
+    splash_show_message(splash, "Starting up...")
+    app.processEvents()
+
     window = MainWindow()
+
+    splash.finish(window)
     window.show()
 
     sys.exit(app.exec_())
