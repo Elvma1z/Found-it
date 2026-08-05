@@ -1,10 +1,51 @@
-﻿from PyQt5.QtWidgets import (
+from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QCheckBox, QSplitter, QTabWidget,
-    QPushButton, QButtonGroup
+    QLabel, QCheckBox, QTabWidget,
+    QPushButton, QMenu, QDockWidget
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent
 from PyQt5.QtGui import QFont
+
+WINDOW_BTN_STYLE = """
+    QPushButton {
+        background: transparent; color: #999; border: none;
+        font-size: 13px; font-weight: bold;
+    }
+    QPushButton:hover { background-color: #2a2a3e; color: #e0e0e0; }
+"""
+
+WINDOW_CLOSE_BTN_STYLE = """
+    QPushButton {
+        background: transparent; color: #999; border: none;
+        font-size: 13px; font-weight: bold;
+    }
+    QPushButton:hover { background-color: #e53935; color: white; }
+"""
+
+
+class TitleBar(QWidget):
+    """The nav bar doubles as the window's title bar: dragging empty space
+    on it moves the (frameless) window, double-clicking toggles maximize."""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            window = self.window()
+            if window.isMaximized():
+                window.showNormal()
+            else:
+                window.showMaximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 from found_it.config import ITEM_INACTIVE_SECONDS
 from found_it.camera.capture import CameraCapture
@@ -12,9 +53,9 @@ from found_it.camera.dewarp import FisheyeDewarp, EquirectangularDewarp
 from found_it.detection.detector import ItemDetector
 from found_it.detection.item_mapper import ItemMapper
 from found_it.storage.database import Database
-from found_it.storage.models import DetectedItem, RoomConfig
-from found_it.utils.room_config import load_room_config
-from found_it.utils.app_settings import load_app_settings
+from found_it.storage.models import DetectedItem
+from found_it.utils.room_profiles import load_room_profiles
+from found_it.utils.app_settings import load_app_settings, save_app_settings
 from found_it.gui.camera_view import CameraView
 from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
@@ -28,22 +69,32 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Found It")
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumSize(1200, 700)
         self.resize(1400, 800)
 
-        self.room_config = load_room_config()
+        self.room_profiles = load_room_profiles()
         self.app_settings = load_app_settings()
+        self.active_room_id = self._resolve_active_room_id()
         self.db = Database()
         self.detector = ItemDetector()
-        self.mapper = ItemMapper(self.room_config)
-        self.cameras = {}
-        self.dewarpers = {}
+        self.room_mappers = {}
+        self.room_cameras = {}
+        self.room_dewarpers = {}
         self.cam_views = {}
         self._frame_count = 0
 
         self._setup_ui()
         self._setup_timers()
-        self._apply_camera_config()
+        self._start_all_room_cameras()
+
+    def _get_profile(self, room_id):
+        return next((p for p in self.room_profiles if p.id == room_id), None)
+
+    def _resolve_active_room_id(self) -> str:
+        if any(p.id == self.app_settings.active_room_id for p in self.room_profiles):
+            return self.app_settings.active_room_id
+        return self.room_profiles[0].id
 
     def _setup_ui(self):
         central = QWidget()
@@ -52,11 +103,11 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        nav_bar = QWidget()
+        nav_bar = TitleBar()
         nav_bar.setFixedHeight(48)
         nav_bar.setStyleSheet("background-color: #0d0d1a; border-bottom: 1px solid #222;")
         nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(12, 0, 12, 0)
+        nav_layout.setContentsMargins(12, 0, 0, 0)
 
         app_title = QLabel("Found It")
         app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
@@ -140,6 +191,29 @@ class MainWindow(QMainWindow):
         self.settings_btn.clicked.connect(lambda: self._switch_mode("settings"))
         nav_layout.addWidget(self.settings_btn)
 
+        nav_layout.addSpacing(12)
+
+        self.minimize_btn = QPushButton("─")
+        self.minimize_btn.setFixedSize(44, 48)
+        self.minimize_btn.setToolTip("Minimize")
+        self.minimize_btn.setStyleSheet(WINDOW_BTN_STYLE)
+        self.minimize_btn.clicked.connect(self.showMinimized)
+        nav_layout.addWidget(self.minimize_btn)
+
+        self.maximize_btn = QPushButton("☐")
+        self.maximize_btn.setFixedSize(44, 48)
+        self.maximize_btn.setToolTip("Maximize")
+        self.maximize_btn.setStyleSheet(WINDOW_BTN_STYLE)
+        self.maximize_btn.clicked.connect(self._toggle_maximize)
+        nav_layout.addWidget(self.maximize_btn)
+
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(44, 48)
+        self.close_btn.setToolTip("Close")
+        self.close_btn.setStyleSheet(WINDOW_CLOSE_BTN_STYLE)
+        self.close_btn.clicked.connect(self.close)
+        nav_layout.addWidget(self.close_btn)
+
         main_layout.addWidget(nav_bar)
 
         self.content_stack = QWidget()
@@ -155,6 +229,7 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel()
         self.settings_panel.settings_updated.connect(self._on_settings_updated)
         self.settings_panel.connect_device_requested.connect(self._on_connect_saved_device)
+        self.settings_panel.rooms_imported.connect(self._on_rooms_imported)
 
         self.content_layout.addWidget(self.room_widget)
         self.content_layout.addWidget(self.room_setup_panel)
@@ -178,14 +253,28 @@ class MainWindow(QMainWindow):
         """)
 
     def _build_room_view(self):
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        tracker = QMainWindow()
+        tracker.setDockOptions(
+            QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks
+        )
+        tracker.setStyleSheet("""
+            QMainWindow::separator { background: #222; width: 4px; height: 4px; }
+            QMainWindow::separator:hover { background: #6c63ff; }
+            QDockWidget { color: #e0e0e0; font-size: 12px; font-weight: bold; }
+            QDockWidget::title { background: #0d0d1a; padding: 6px 8px; border-bottom: 1px solid #222; }
+            QMenuBar { background: #0d0d1a; color: #aaa; border-bottom: 1px solid #222; }
+            QMenuBar::item { padding: 4px 10px; }
+            QMenuBar::item:selected { background: #2a2a3e; color: #e0e0e0; }
+            QMenu { background: #1a1a2e; color: #ccc; border: 1px solid #333; }
+            QMenu::item:selected { background: #2a2a3e; color: #e0e0e0; }
+        """)
 
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(8, 8, 4, 8)
+        view_menu = tracker.menuBar().addMenu("View")
+
+        # --- Cameras dock: movable, floatable, closable - drag it wherever ---
+        camera_widget = QWidget()
+        camera_layout = QVBoxLayout(camera_widget)
+        camera_layout.setContentsMargins(8, 8, 8, 8)
 
         controls = QHBoxLayout()
         self.dewarp_check = QCheckBox("Dewarp")
@@ -193,7 +282,7 @@ class MainWindow(QMainWindow):
         self.dewarp_check.setStyleSheet("color: #aaa;")
         controls.addWidget(self.dewarp_check)
         controls.addStretch()
-        left_layout.addLayout(controls)
+        camera_layout.addLayout(controls)
 
         self.cam_tabs = QTabWidget()
         self.cam_tabs.setStyleSheet("""
@@ -205,8 +294,46 @@ class MainWindow(QMainWindow):
             }
             QTabBar::tab:selected { background: #2a2a3e; color: #e0e0e0; }
         """)
-        left_layout.addWidget(self.cam_tabs)
 
+        active_profile = self._get_profile(self.active_room_id)
+        self.main_room_btn = QPushButton(active_profile.name)
+        self.main_room_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2a3e; color: #e0e0e0;
+                border: 1px solid #444; border-radius: 4px;
+                padding: 4px 12px; font-size: 12px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3a3a5e; }
+            QPushButton::menu-indicator { width: 0px; }
+        """)
+        self.main_room_btn.clicked.connect(self._show_room_menu)
+        self.cam_tabs.setCornerWidget(self.main_room_btn, Qt.TopRightCorner)
+        camera_layout.addWidget(self.cam_tabs)
+
+        self.camera_dock = QDockWidget("Cameras", tracker)
+        self.camera_dock.setObjectName("camera_dock")
+        self.camera_dock.setWidget(camera_widget)
+        self.camera_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
+        )
+        tracker.addDockWidget(Qt.LeftDockWidgetArea, self.camera_dock)
+        view_menu.addAction(self.camera_dock.toggleViewAction())
+
+        # --- Found Items dock: movable, floatable, closable ---
+        self.search_panel = SearchPanel()
+        self.search_panel.item_selected.connect(self._on_item_selected)
+        self.search_panel.set_room_names({p.id: p.name for p in self.room_profiles})
+
+        self.found_items_dock = QDockWidget("Found Items", tracker)
+        self.found_items_dock.setObjectName("found_items_dock")
+        self.found_items_dock.setWidget(self.search_panel)
+        self.found_items_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
+        )
+        tracker.addDockWidget(Qt.RightDockWidgetArea, self.found_items_dock)
+        view_menu.addAction(self.found_items_dock.toggleViewAction())
+
+        # --- Room Map: fixed central area ---
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(4, 8, 4, 8)
@@ -224,22 +351,28 @@ class MainWindow(QMainWindow):
         center_layout.addLayout(map_header)
 
         self.room_map = RoomMap()
-        self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
-        self.room_map.set_zones(self.room_config.zones)
-        self.room_map.set_cameras(self.room_config.cameras)
+        self.room_map.set_room_size(active_profile.width_m, active_profile.height_m)
+        self.room_map.set_zones(active_profile.zones)
+        self.room_map.set_cameras(active_profile.cameras)
         center_layout.addWidget(self.room_map)
 
-        self.search_panel = SearchPanel()
-        self.search_panel.item_selected.connect(self._on_item_selected)
+        tracker.setCentralWidget(center_panel)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(center_panel)
-        splitter.addWidget(self.search_panel)
-        splitter.setSizes([500, 500, 300])
+        self._restore_room_tracker_layout(tracker)
 
-        layout.addWidget(splitter)
-        return widget
+        return tracker
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange and hasattr(self, "maximize_btn"):
+            self.maximize_btn.setText("❐" if self.isMaximized() else "☐")
+            self.maximize_btn.setToolTip("Restore" if self.isMaximized() else "Maximize")
+        super().changeEvent(event)
 
     def _switch_mode(self, mode):
         self.room_widget.hide()
@@ -269,21 +402,44 @@ class MainWindow(QMainWindow):
             self.settings_panel.show()
             self.settings_btn.setChecked(True)
 
+    def _show_room_menu(self):
+        menu = QMenu(self)
+        for profile in self.room_profiles:
+            action = menu.addAction(profile.name)
+            action.setCheckable(True)
+            action.setChecked(profile.id == self.active_room_id)
+            action.triggered.connect(lambda checked, rid=profile.id: self._switch_display_room(rid))
+        menu.exec_(self.main_room_btn.mapToGlobal(self.main_room_btn.rect().bottomLeft()))
+
+    def _switch_display_room(self, room_id: str):
+        if room_id == self.active_room_id or self._get_profile(room_id) is None:
+            return
+        self.active_room_id = room_id
+        self.app_settings.active_room_id = room_id
+        save_app_settings(self.app_settings)
+        self._refresh_display_room_ui()
+
     def _on_settings_updated(self):
         self.app_settings = load_app_settings()
         self.dewarp_check.setChecked(self.app_settings.dewarp_default)
-        self._apply_camera_config()
+        self._start_all_room_cameras()
 
     def _on_connect_saved_device(self, serial: str):
         self._switch_mode("device")
         self.device_search_panel.connect_saved_device(serial)
 
     def _on_room_updated(self):
-        self.room_config = load_room_config()
-        self.mapper.room = self.room_config
-        self.room_map.set_room_size(self.room_config.width_m, self.room_config.height_m)
-        self.room_map.set_zones(self.room_config.zones)
-        self._apply_camera_config()
+        self.room_profiles = load_room_profiles()
+        if self._get_profile(self.active_room_id) is None:
+            self.active_room_id = self.room_profiles[0].id
+            self.app_settings.active_room_id = self.active_room_id
+            save_app_settings(self.app_settings)
+        self.search_panel.set_room_names({p.id: p.name for p in self.room_profiles})
+        self._start_all_room_cameras()
+
+    def _on_rooms_imported(self):
+        self._on_room_updated()
+        self.room_setup_panel.reload_profiles()
 
     def _setup_timers(self):
         self._detect_timer = QTimer()
@@ -302,109 +458,164 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self._refresh_display)
         self._refresh_timer.start(2000)
 
-    def _apply_camera_config(self):
-        for cam in self.cameras.values():
-            cam.stop()
-        self.cameras = {}
-        self.dewarpers = {}
-        self.cam_views = {}
-        self.cam_tabs.clear()
+    def _start_all_room_cameras(self):
+        """(Re)start every saved room profile's cameras so all of them keep
+        tracking in the background, regardless of which one is displayed."""
+        for cams in self.room_cameras.values():
+            for cam in cams.values():
+                cam.stop()
 
-        for cam_cfg in self.room_config.cameras:
+        self.room_cameras = {}
+        self.room_dewarpers = {}
+        self.room_mappers = {}
+        used_device_ids = {}
+
+        for profile in self.room_profiles:
+            self.room_mappers[profile.id] = ItemMapper(profile)
+            cams = {}
+            dewarpers = {}
+
+            for cam_cfg in profile.cameras:
+                if not cam_cfg.get("enabled"):
+                    continue
+
+                cam_id = cam_cfg["id"]
+                if cam_id in used_device_ids:
+                    self.statusBar().showMessage(
+                        f"Camera {cam_id} in \"{profile.name}\" skipped - already in use by "
+                        f"\"{used_device_ids[cam_id]}\". Give each room's cameras distinct IDs."
+                    )
+                    continue
+
+                cam = CameraCapture(cam_id)
+                if not cam.start():
+                    continue
+
+                used_device_ids[cam_id] = profile.name
+                cams[cam_id] = cam
+
+                if cam_cfg.get("is_360"):
+                    dewarpers[cam_id] = EquirectangularDewarp(fov=90.0, num_views=4)
+                elif self.app_settings.dewarp_default:
+                    dewarper = FisheyeDewarp(cam_id)
+                    frame = cam.get_frame()
+                    if frame is not None:
+                        h, w = frame.shape[:2]
+                        dewarper.load_calibration((w, h))
+                    dewarpers[cam_id] = dewarper
+
+            self.room_cameras[profile.id] = cams
+            self.room_dewarpers[profile.id] = dewarpers
+
+        self._refresh_display_room_ui()
+
+    def _refresh_display_room_ui(self):
+        """Rebuild the camera tabs and room map for whichever room is
+        currently selected as the displayed "Main Room" - the underlying
+        camera captures for every room keep running regardless."""
+        self.cam_tabs.clear()
+        self.cam_views = {}
+
+        profile = self._get_profile(self.active_room_id)
+        if profile is None:
+            return
+
+        cams = self.room_cameras.get(profile.id, {})
+        for cam_cfg in profile.cameras:
             if not cam_cfg.get("enabled"):
                 continue
-
             cam_id = cam_cfg["id"]
+            if cam_id not in cams:
+                continue
             label = cam_cfg.get("label", f"Camera {cam_id}")
-
             view = CameraView(cam_id)
             self.cam_tabs.addTab(view, label)
             self.cam_views[cam_id] = view
 
-            cam = CameraCapture(cam_id)
-            if not cam.start():
-                self.statusBar().showMessage(f"Camera {cam_id} not found")
-                continue
-
-            self.cameras[cam_id] = cam
-            self.statusBar().showMessage(f"Camera {cam_id} connected")
-
-            if cam_cfg.get("is_360"):
-                self.dewarpers[cam_id] = EquirectangularDewarp(fov=90.0, num_views=4)
-            elif self.app_settings.dewarp_default:
-                dewarper = FisheyeDewarp(cam_id)
-                frame = cam.get_frame()
-                if frame is not None:
-                    h, w = frame.shape[:2]
-                    dewarper.load_calibration((w, h))
-                self.dewarpers[cam_id] = dewarper
-
-        self.room_map.set_cameras(self.room_config.cameras)
+        self.room_map.set_room_size(profile.width_m, profile.height_m)
+        self.room_map.set_zones(profile.zones)
+        self.room_map.set_cameras(profile.cameras)
+        self.main_room_btn.setText(profile.name)
 
     def _detection_cycle(self):
         self._frame_count += 1
         if self._frame_count % self.app_settings.detection_frame_skip != 0:
             return
 
-        all_detections_per_cam = []
+        total_detections = 0
 
-        for cam_id, cam in self.cameras.items():
-            frame = cam.get_frame()
-            if frame is None:
+        for profile in self.room_profiles:
+            cams = self.room_cameras.get(profile.id, {})
+            if not cams:
+                continue
+            dewarpers = self.room_dewarpers.get(profile.id, {})
+            mapper = self.room_mappers.get(profile.id)
+            if mapper is None:
                 continue
 
-            if self.dewarp_check.isChecked() and cam_id in self.dewarpers:
-                frame = self.dewarpers[cam_id].dewarp(frame)
+            all_detections_per_cam = []
+            for cam_id, cam in cams.items():
+                frame = cam.get_frame()
+                if frame is None:
+                    continue
 
-            detections = self.detector.detect(frame, cam_id, confidence=self.app_settings.detection_confidence)
-            all_detections_per_cam.append(detections)
+                if self.dewarp_check.isChecked() and cam_id in dewarpers:
+                    frame = dewarpers[cam_id].dewarp(frame)
 
-        merged = self.mapper.merge_detections(all_detections_per_cam)
+                detections = self.detector.detect(frame, cam_id, confidence=self.app_settings.detection_confidence)
+                all_detections_per_cam.append(detections)
 
-        for det in merged:
-            room_x, room_y = self.mapper.pixel_to_room(
-                det["zone_x"], det["zone_y"], det["camera_id"]
-            )
-            zone_name = self.mapper.get_zone_name(room_x, room_y)
+            merged = mapper.merge_detections(all_detections_per_cam)
+            total_detections += len(merged)
 
-            existing = self.db.find_matching_item(
-                det["label"], det["camera_id"],
-                det["zone_x"], det["zone_y"]
-            )
-
-            if existing:
-                self.db.update_item_position(
-                    existing["id"], det["zone_x"], det["zone_y"],
-                    det["confidence"], zone_name
+            for det in merged:
+                room_x, room_y = mapper.pixel_to_room(
+                    det["zone_x"], det["zone_y"], det["camera_id"]
                 )
-            else:
-                item = DetectedItem(
-                    label=det["label"],
-                    confidence=det["confidence"],
-                    camera_id=det["camera_id"],
-                    zone_x=det["zone_x"],
-                    zone_y=det["zone_y"],
-                    bbox_x1=det["bbox_x1"],
-                    bbox_y1=det["bbox_y1"],
-                    bbox_x2=det["bbox_x2"],
-                    bbox_y2=det["bbox_y2"],
-                    snapshot_path=det.get("snapshot_path"),
-                    zone_name=zone_name,
+                zone_name = mapper.get_zone_name(room_x, room_y)
+
+                existing = self.db.find_matching_item(
+                    det["label"], det["camera_id"],
+                    det["zone_x"], det["zone_y"], profile.id
                 )
-                self.db.insert_item(item)
+
+                if existing:
+                    self.db.update_item_position(
+                        existing["id"], det["zone_x"], det["zone_y"],
+                        det["confidence"], zone_name
+                    )
+                else:
+                    item = DetectedItem(
+                        label=det["label"],
+                        confidence=det["confidence"],
+                        camera_id=det["camera_id"],
+                        zone_x=det["zone_x"],
+                        zone_y=det["zone_y"],
+                        bbox_x1=det["bbox_x1"],
+                        bbox_y1=det["bbox_y1"],
+                        bbox_x2=det["bbox_x2"],
+                        bbox_y2=det["bbox_y2"],
+                        snapshot_path=det.get("snapshot_path"),
+                        zone_name=zone_name,
+                        room_id=profile.id,
+                    )
+                    self.db.insert_item(item)
 
         self.statusBar().showMessage(
-            f"Detected {len(merged)} objects"
+            f"Detected {total_detections} objects across {len(self.room_profiles)} room(s)"
         )
 
     def _display_cycle(self):
-        for cam_id, cam in self.cameras.items():
+        cams = self.room_cameras.get(self.active_room_id, {})
+        dewarpers = self.room_dewarpers.get(self.active_room_id, {})
+
+        for cam_id, cam in cams.items():
             frame = cam.get_frame()
             if frame is None:
                 continue
 
-            if self.dewarp_check.isChecked() and cam_id in self.dewarpers:
-                frame = self.dewarpers[cam_id].dewarp(frame)
+            if self.dewarp_check.isChecked() and cam_id in dewarpers:
+                frame = dewarpers[cam_id].dewarp(frame)
 
             view = self.cam_views.get(cam_id)
             if view is not None:
@@ -414,28 +625,51 @@ class MainWindow(QMainWindow):
         self.db.deactivate_old_items(ITEM_INACTIVE_SECONDS)
 
     def _refresh_display(self):
-        active = self.db.get_active_items()
+        active_room_items = self.db.get_active_items(room_id=self.active_room_id)
+        mapper = self.room_mappers.get(self.active_room_id)
 
         map_items = []
-        for item in active:
-            room_x, room_y = self.mapper.pixel_to_room(
-                item["zone_x"], item["zone_y"], item["camera_id"]
-            )
-            map_items.append({
-                **item,
-                "room_x": room_x,
-                "room_y": room_y,
-            })
-
+        if mapper is not None:
+            for item in active_room_items:
+                room_x, room_y = mapper.pixel_to_room(
+                    item["zone_x"], item["zone_y"], item["camera_id"]
+                )
+                map_items.append({
+                    **item,
+                    "room_x": room_x,
+                    "room_y": room_y,
+                })
         self.room_map.update_items(map_items)
-        self.search_panel.show_all_items(active)
-        self.status_indicator.setText(f"Tracking {len(active)} items")
+
+        all_active_items = self.db.get_active_items()
+        self.search_panel.show_all_items(all_active_items)
+        self.status_indicator.setText(
+            f"Tracking {len(all_active_items)} item(s) across {len(self.room_profiles)} room(s)"
+        )
 
     def _on_item_selected(self, item: dict):
-        self.room_map.select_item(item.get("id"))
+        if item.get("room_id") == self.active_room_id:
+            self.room_map.select_item(item.get("id"))
+
+    def _restore_room_tracker_layout(self, tracker: QMainWindow):
+        state_b64 = self.app_settings.room_tracker_layout
+        if not state_b64:
+            return
+        try:
+            state = QByteArray.fromBase64(state_b64.encode())
+            tracker.restoreState(state)
+        except Exception:
+            pass
+
+    def _save_room_tracker_layout(self):
+        state = self.room_widget.saveState()
+        self.app_settings.room_tracker_layout = bytes(state.toBase64()).decode()
+        save_app_settings(self.app_settings)
 
     def closeEvent(self, event):
-        for cam in self.cameras.values():
-            cam.stop()
+        self._save_room_tracker_layout()
+        for cams in self.room_cameras.values():
+            for cam in cams.values():
+                cam.stop()
         self.db.close()
         event.accept()

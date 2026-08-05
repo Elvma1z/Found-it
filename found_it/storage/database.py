@@ -59,6 +59,8 @@ class Database:
         item_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(items)").fetchall()}
         if "zone_name" not in item_columns:
             self.conn.execute("ALTER TABLE items ADD COLUMN zone_name TEXT")
+        if "room_id" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN room_id TEXT DEFAULT 'main'")
 
         self.conn.commit()
 
@@ -66,11 +68,11 @@ class Database:
         cursor = self.conn.execute(
             """INSERT INTO items
                (label, camera_id, zone_x, zone_y, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
-                confidence, snapshot_path, zone_name, first_seen, last_seen, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, snapshot_path, zone_name, room_id, first_seen, last_seen, is_active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (item.label, item.camera_id, item.zone_x, item.zone_y,
              item.bbox_x1, item.bbox_y1, item.bbox_x2, item.bbox_y2,
-             item.confidence, item.snapshot_path, item.zone_name,
+             item.confidence, item.snapshot_path, item.zone_name, item.room_id,
              item.first_seen.isoformat(), item.last_seen.isoformat(),
              int(item.is_active))
         )
@@ -112,10 +114,16 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_active_items(self) -> list[dict]:
-        cursor = self.conn.execute(
-            """SELECT * FROM items WHERE is_active = 1 ORDER BY last_seen DESC"""
-        )
+    def get_active_items(self, room_id: Optional[str] = None) -> list[dict]:
+        if room_id is not None:
+            cursor = self.conn.execute(
+                """SELECT * FROM items WHERE is_active = 1 AND room_id = ? ORDER BY last_seen DESC""",
+                (room_id,)
+            )
+        else:
+            cursor = self.conn.execute(
+                """SELECT * FROM items WHERE is_active = 1 ORDER BY last_seen DESC"""
+            )
         return [dict(row) for row in cursor.fetchall()]
 
     def count_items(self) -> int:
@@ -126,25 +134,32 @@ class Database:
         self.conn.execute("DELETE FROM items")
         self.conn.commit()
 
-    def get_recent_items(self, limit: int = 50) -> list[dict]:
-        cursor = self.conn.execute(
-            """SELECT * FROM items ORDER BY last_seen DESC LIMIT ?""",
-            (limit,)
-        )
+    def get_recent_items(self, limit: int = 50, room_id: Optional[str] = None) -> list[dict]:
+        if room_id is not None:
+            cursor = self.conn.execute(
+                """SELECT * FROM items WHERE room_id = ? ORDER BY last_seen DESC LIMIT ?""",
+                (room_id, limit)
+            )
+        else:
+            cursor = self.conn.execute(
+                """SELECT * FROM items ORDER BY last_seen DESC LIMIT ?""",
+                (limit,)
+            )
         return [dict(row) for row in cursor.fetchall()]
 
     def find_matching_item(self, label: str, camera_id: int,
-                           zone_x: float, zone_y: float,
+                           zone_x: float, zone_y: float, room_id: str,
                            tolerance: float = 0.15) -> Optional[dict]:
         cursor = self.conn.execute(
             """SELECT * FROM items
                WHERE LOWER(label) = LOWER(?)
                  AND camera_id = ?
+                 AND room_id = ?
                  AND ABS(zone_x - ?) < ?
                  AND ABS(zone_y - ?) < ?
                  AND is_active = 1
                LIMIT 1""",
-            (label, camera_id, zone_x, tolerance, zone_y, tolerance)
+            (label, camera_id, room_id, zone_x, tolerance, zone_y, tolerance)
         )
         row = cursor.fetchone()
         return dict(row) if row else None

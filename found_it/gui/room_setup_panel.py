@@ -1,13 +1,15 @@
+import uuid
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
-    QFrame, QDoubleSpinBox, QSpinBox, QComboBox, QSplitter
+    QFrame, QDoubleSpinBox, QSpinBox, QComboBox, QSplitter,
+    QInputDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush
 from typing import List, Optional, Tuple
 
-from found_it.utils.room_config import load_room_config, save_room_config
+from found_it.utils.room_profiles import load_room_profiles, save_room_profiles
 from found_it.storage.database import Database
 from found_it.storage.models import RoomConfig
 from found_it.detection.item_mapper import ItemMapper
@@ -457,12 +459,33 @@ class RoomSetupPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.room_config = load_room_config()
-        self.zones: List[dict] = [dict(z) for z in self.room_config.zones]
-        self.cameras: List[dict] = [dict(c) for c in self.room_config.cameras]
+        self.profiles: List[RoomConfig] = load_room_profiles()
+        self._active_profile_index = 0
+        self.zones: List[dict] = [dict(z) for z in self.profiles[0].zones]
+        self.cameras: List[dict] = [dict(c) for c in self.profiles[0].cameras]
         self._setup_ui()
+        self._refresh_profile_list()
         self._load_from_config()
         self._refresh_zone_list()
+        self._refresh_camera_list()
+        self._refresh_object_list()
+
+    def _active_profile(self) -> RoomConfig:
+        return self.profiles[self._active_profile_index]
+
+    def reload_profiles(self):
+        """Re-read room profiles from disk - for changes made outside this
+        panel (e.g. importing room data in Settings) so it doesn't keep
+        editing a stale in-memory copy and clobber the import on next Save."""
+        self.profiles = load_room_profiles()
+        if self._active_profile_index >= len(self.profiles):
+            self._active_profile_index = 0
+        self.zones = [dict(z) for z in self._active_profile().zones]
+        self.cameras = [dict(c) for c in self._active_profile().cameras]
+        self._refresh_profile_list()
+        self._load_from_config()
+        self._refresh_zone_list()
+        self._refresh_drawer_list()
         self._refresh_camera_list()
         self._refresh_object_list()
 
@@ -476,7 +499,8 @@ class RoomSetupPanel(QWidget):
         title.setStyleSheet("color: #e0e0e0;")
         outer.addWidget(title)
 
-        desc = QLabel("Set your bedroom's size, sketch out zones like the bed or desk, and rename detected objects.")
+        desc = QLabel("Set a room's size, sketch out zones like the bed or desk, and rename detected objects. "
+                       "Use \"New Room\" to add another room profile, or \"Rename\" to rename this one.")
         desc.setStyleSheet("color: #888; font-size: 11px;")
         desc.setWordWrap(True)
         outer.addWidget(desc)
@@ -487,6 +511,39 @@ class RoomSetupPanel(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 4, 4, 4)
+
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self._label("Editing Room"))
+        self.profile_selector = QComboBox()
+        self.profile_selector.setStyleSheet(INPUT_STYLE)
+        self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
+        profile_row.addWidget(self.profile_selector, 1)
+
+        self.new_room_btn = QPushButton("New Room")
+        self.new_room_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.new_room_btn.clicked.connect(self._on_new_room)
+        profile_row.addWidget(self.new_room_btn)
+
+        self.rename_room_btn = QPushButton("Rename")
+        self.rename_room_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.rename_room_btn.clicked.connect(self._on_rename_room)
+        profile_row.addWidget(self.rename_room_btn)
+
+        self.delete_room_btn = QPushButton("Delete")
+        self.delete_room_btn.setStyleSheet(SECONDARY_BUTTON_STYLE)
+        self.delete_room_btn.clicked.connect(self._on_delete_room)
+        profile_row.addWidget(self.delete_room_btn)
+        left_layout.addLayout(profile_row)
+
+        profile_hint = QLabel(
+            "Every saved room tracks its own cameras in the background at the same time, "
+            "even while you're viewing a different one - so each room needs cameras with "
+            "their own distinct IDs. Switch which one you're viewing from the \"Main Room\" "
+            "button in Room Tracker."
+        )
+        profile_hint.setStyleSheet("color: #666; font-size: 10px;")
+        profile_hint.setWordWrap(True)
+        left_layout.addWidget(profile_hint)
 
         dims_row = QHBoxLayout()
         dims_row.addWidget(self._label("Width (m)"))
@@ -739,18 +796,100 @@ class RoomSetupPanel(QWidget):
         return lbl
 
     def _load_from_config(self):
+        profile = self._active_profile()
         self.width_input.blockSignals(True)
         self.height_input.blockSignals(True)
-        self.width_input.setValue(self.room_config.width_m)
-        self.height_input.setValue(self.room_config.height_m)
+        self.width_input.setValue(profile.width_m)
+        self.height_input.setValue(profile.height_m)
         self.width_input.blockSignals(False)
         self.height_input.blockSignals(False)
-        self.canvas.set_room_size(self.room_config.width_m, self.room_config.height_m)
+        self.canvas.set_room_size(profile.width_m, profile.height_m)
         self.canvas.set_zones(self.zones)
         self.canvas.set_cameras(self.cameras)
 
     def _on_size_changed(self):
         self.canvas.set_room_size(self.width_input.value(), self.height_input.value())
+
+    def _refresh_profile_list(self):
+        self.profile_selector.blockSignals(True)
+        self.profile_selector.clear()
+        for profile in self.profiles:
+            self.profile_selector.addItem(profile.name)
+        self.profile_selector.setCurrentIndex(self._active_profile_index)
+        self.profile_selector.blockSignals(False)
+
+    def _on_profile_selected(self, index: int):
+        if index < 0 or index >= len(self.profiles):
+            return
+        self._active_profile_index = index
+        profile = self._active_profile()
+        self.zones = [dict(z) for z in profile.zones]
+        self.cameras = [dict(c) for c in profile.cameras]
+        self._selected_zone_index = None
+        self._selected_drawer_index = None
+        self._selected_camera_index = None
+        self.zone_rename_input.clear()
+        self.camera_rename_input.clear()
+        self._load_from_config()
+        self._refresh_zone_list()
+        self._refresh_drawer_list()
+        self._refresh_camera_list()
+        self._refresh_object_list()
+        self.status_label.setText(f"Editing \"{profile.name}\".")
+
+    def _on_new_room(self):
+        name, ok = QInputDialog.getText(self, "New Room", "Room name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        new_profile = RoomConfig(
+            id=uuid.uuid4().hex[:8],
+            name=name,
+            cameras=[],
+            zones=[],
+        )
+        self.profiles.append(new_profile)
+        save_room_profiles(self.profiles)
+        self._active_profile_index = len(self.profiles) - 1
+        self._refresh_profile_list()
+        self._on_profile_selected(self._active_profile_index)
+        self.status_label.setText(
+            f"Created \"{name}\". Set its size, add its own cameras, then Save Room."
+        )
+        self.room_updated.emit()
+
+    def _on_rename_room(self):
+        profile = self._active_profile()
+        new_name, ok = QInputDialog.getText(self, "Rename Room", "Room name:", text=profile.name)
+        if not ok or not new_name.strip():
+            return
+        profile.name = new_name.strip()
+        save_room_profiles(self.profiles)
+        self._refresh_profile_list()
+        self.status_label.setText(f"Renamed to \"{profile.name}\".")
+        self.room_updated.emit()
+
+    def _on_delete_room(self):
+        if len(self.profiles) <= 1:
+            self.status_label.setText("Can't delete the only room.")
+            return
+        profile = self._active_profile()
+        confirm = QMessageBox.question(
+            self, "Delete Room",
+            f"Delete \"{profile.name}\" and stop tracking its cameras? "
+            "Its item history is kept, just no longer shown as an active room.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        del self.profiles[self._active_profile_index]
+        self._active_profile_index = 0
+        save_room_profiles(self.profiles)
+        self._refresh_profile_list()
+        self._on_profile_selected(0)
+        self.status_label.setText(f"Deleted \"{profile.name}\".")
+        self.room_updated.emit()
 
     def _on_draw_zone_clicked(self, checked: bool):
         if checked and not self.zone_name_input.text().strip():
@@ -775,7 +914,7 @@ class RoomSetupPanel(QWidget):
 
     def _on_scan_room(self):
         db = Database()
-        active_items = db.get_active_items()
+        active_items = db.get_active_items(room_id=self._active_profile().id)
         db.close()
 
         temp_config = RoomConfig(
@@ -992,12 +1131,13 @@ class RoomSetupPanel(QWidget):
         self.status_label.setText(f"Renamed drawer to \"{new_name}\". Don't forget to Save Room.")
 
     def _on_save(self):
-        self.room_config.width_m = self.width_input.value()
-        self.room_config.height_m = self.height_input.value()
-        self.room_config.zones = self.zones
-        self.room_config.cameras = self.cameras
-        save_room_config(self.room_config)
-        self.status_label.setText("Room saved.")
+        profile = self._active_profile()
+        profile.width_m = self.width_input.value()
+        profile.height_m = self.height_input.value()
+        profile.zones = self.zones
+        profile.cameras = self.cameras
+        save_room_profiles(self.profiles)
+        self.status_label.setText(f"Saved \"{profile.name}\".")
         self.room_updated.emit()
 
     def _refresh_camera_list(self):
@@ -1093,7 +1233,7 @@ class RoomSetupPanel(QWidget):
 
     def _refresh_object_list(self):
         db = Database()
-        items = db.get_recent_items(100)
+        items = db.get_recent_items(100, room_id=self._active_profile().id)
         db.close()
 
         self.object_list.clear()

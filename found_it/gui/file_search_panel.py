@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame, QFileDialog, QProgressBar, QSplitter,
-    QTextEdit
+    QTextEdit, QInputDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QColor, QIcon
@@ -99,7 +99,26 @@ class FileSearchPanel(QWidget):
         """)
         self.scan_btn.clicked.connect(self._start_scan)
         folder_row.addWidget(self.scan_btn)
+
+        self.add_image_btn = QPushButton("+ Add Image")
+        self.add_image_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2a3e; color: #aaa;
+                border: 1px solid #444; border-radius: 4px;
+                padding: 4px 12px; font-size: 11px;
+            }
+            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
+            QPushButton:disabled { color: #555; }
+        """)
+        self.add_image_btn.clicked.connect(self._add_named_image)
+        folder_row.addWidget(self.add_image_btn)
         layout.addLayout(folder_row)
+
+        add_image_hint = QLabel('Or add one specific image and give it a name (e.g. "Passport") '
+                                 'to jump straight to it later by typing that name.')
+        add_image_hint.setStyleSheet("color: #666; font-size: 10px;")
+        add_image_hint.setWordWrap(True)
+        layout.addWidget(add_image_hint)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -223,6 +242,35 @@ class FileSearchPanel(QWidget):
             progress_callback=self._on_progress,
             done_callback=self._on_scan_done
         )
+
+    def _add_named_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select an image to add",
+            "", "Images (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif)"
+        )
+        if not path:
+            return
+
+        default_name = os.path.splitext(os.path.basename(path))[0]
+        name, ok = QInputDialog.getText(
+            self, "Name this image", 'Name (e.g. "My Wallet"):', text=default_name
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        self.add_image_btn.setEnabled(False)
+        self.status_label.setText(f'Adding "{name}"...')
+        self.engine.add_named_image(path, name, done_callback=self._on_add_image_done)
+
+    def _on_add_image_done(self, success: bool, name: str):
+        self.add_image_btn.setEnabled(True)
+        if success:
+            self.status_label.setText(f'Added "{name}". Search for that name to find it instantly.')
+        else:
+            self.status_label.setText(
+                f'Couldn\'t add "{name}" - image search needs open-clip-torch installed.'
+            )
 
     def _on_progress(self, message):
         self.status_label.setText(message)
