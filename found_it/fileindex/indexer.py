@@ -10,6 +10,12 @@ from found_it.config import DATA_DIR
 
 INDEX_DB = DATA_DIR / "file_index.db"
 
+# This app's own project root (source, venvs, and PyInstaller build/dist
+# output). Never worth indexing as "the user's files" - if it happens to sit
+# under a folder the user picks (e.g. a Documents\GitHub checkout), its
+# bundled dependency copies would otherwise dwarf real personal content.
+APP_ROOT = Path(__file__).resolve().parents[2]
+
 
 @dataclass
 class FileEntry:
@@ -42,10 +48,15 @@ CODE_EXTENSIONS = {
 
 SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".idea", ".vscode", "dist", "build", ".next", ".cache",
+    ".idea", ".vscode", ".next", ".cache", "site-packages", "_internal",
     "AppData", "Program Files", "Program Files (x86)",
     "Windows", "ProgramData"
 }
+
+# Matched by prefix (case-insensitive) rather than exact name, so PyInstaller
+# output like "dist2", "dist311-onefile", "build311" is caught too, not just
+# a folder literally named "dist" or "build".
+SKIP_DIR_PREFIXES = ("dist", "build")
 
 
 class FileIndexer:
@@ -53,6 +64,7 @@ class FileIndexer:
         self.entries: List[FileEntry] = []
         self._lock = threading.Lock()
         self._scanning = False
+        self._cancel_requested = False
         self._progress_callback: Optional[Callable] = None
         self._done_callback: Optional[Callable] = None
 
@@ -65,28 +77,50 @@ class FileIndexer:
         self._progress_callback = progress_callback
         self._done_callback = done_callback
         self._scanning = True
+        self._cancel_requested = False
 
         thread = threading.Thread(
             target=self._scan_worker, args=(root_dirs,), daemon=True
         )
         thread.start()
 
+    def cancel_scan(self):
+        """Ask an in-progress walk to stop at the next file/directory it checks -
+        whatever was already found before that stays in the index."""
+        self._cancel_requested = True
+
     def _scan_worker(self, root_dirs: List[str]):
         new_entries = []
         count = 0
+        cancelled = False
 
         for root_dir in root_dirs:
+            if self._cancel_requested:
+                cancelled = True
+                break
+
             root = Path(root_dir)
             if not root.exists():
                 continue
 
             for dirpath, dirnames, filenames in os.walk(root):
+                if self._cancel_requested:
+                    cancelled = True
+                    break
+
                 dirnames[:] = [
                     d for d in dirnames
-                    if d not in SKIP_DIRS and not d.startswith(".")
+                    if d not in SKIP_DIRS
+                    and not d.startswith(".")
+                    and not d.lower().startswith(SKIP_DIR_PREFIXES)
+                    and (Path(dirpath) / d).resolve() != APP_ROOT
                 ]
 
                 for filename in filenames:
+                    if self._cancel_requested:
+                        cancelled = True
+                        break
+
                     filepath = Path(dirpath) / filename
                     ext = filepath.suffix.lower()
 
@@ -117,6 +151,11 @@ class FileIndexer:
 
                     except (OSError, PermissionError):
                         continue
+
+                if cancelled:
+                    break
+            if cancelled:
+                break
 
         with self._lock:
             existing_paths = {e.path for e in self.entries}

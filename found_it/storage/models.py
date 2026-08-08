@@ -57,3 +57,6 @@ class AppSettings:
     dewarp_default: bool = DEWARP_ENABLED
     active_room_id: str = "main"
     room_tracker_layout: str = ""
+    room_setup_layout: str = ""
+    font_family: str = "Segoe UI"
+    theme: str = "Indigo"

@@ -11,14 +11,22 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
 from found_it.device.device_scanner import DeviceScanner, DeviceSearchResult
+from found_it.utils.themes import get_palette, widget_qss, repolish
 
 
 class DeviceSearchPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.scanner = DeviceScanner()
+        self.palette = get_palette("Indigo")
         self._setup_ui()
         self._setup_timer()
+        self.apply_theme(self.palette)
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        self.setStyleSheet(widget_qss(palette))
+        repolish(self)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -27,16 +35,16 @@ class DeviceSearchPanel(QWidget):
 
         title = QLabel("Other Devices")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        title.setStyleSheet("color: #e0e0e0;")
+        title.setProperty("cls", "title")
         layout.addWidget(title)
 
         desc = QLabel("Connect a device via USB-C and search its files")
-        desc.setStyleSheet("color: #888; font-size: 11px;")
+        desc.setProperty("cls", "muted")
         layout.addWidget(desc)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #333;")
+        sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
         conn_row = QHBoxLayout()
@@ -48,14 +56,7 @@ class DeviceSearchPanel(QWidget):
         conn_row.addStretch()
 
         self.connect_btn = QPushButton("Connect")
-        self.connect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 6px 16px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
-        """)
+        self.connect_btn.setProperty("cls", "secondary")
         self.connect_btn.clicked.connect(lambda: self._do_connect())
         conn_row.addWidget(self.connect_btn)
 
@@ -75,14 +76,9 @@ class DeviceSearchPanel(QWidget):
 
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)
+        self.disconnect_btn.setProperty("cls", "secondary")
         self.disconnect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 6px 16px;
-            }
             QPushButton:hover { background-color: #e53935; color: white; }
-            QPushButton:disabled { color: #555; }
         """)
         self.disconnect_btn.clicked.connect(self._disconnect)
         conn_row.addWidget(self.disconnect_btn)
@@ -90,75 +86,41 @@ class DeviceSearchPanel(QWidget):
         layout.addLayout(conn_row)
 
         self.device_label = QLabel("")
-        self.device_label.setStyleSheet("color: #6c63ff; font-size: 12px;")
+        self.device_label.setProperty("cls", "status")
         layout.addWidget(self.device_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #1a1a2e; border: 1px solid #333;
-                border-radius: 4px; text-align: center; color: #aaa;
-                max-height: 20px;
-            }
-            QProgressBar::chunk { background-color: #6c63ff; border-radius: 3px; }
-        """)
         layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.status_label.setProperty("cls", "hint")
         layout.addWidget(self.status_label)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet("color: #333;")
+        sep2.setProperty("cls", "sep")
         layout.addWidget(sep2)
 
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Describe the file you're looking for...")
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2a2a3e; color: #e0e0e0;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 8px; font-size: 13px;
-            }
-            QLineEdit:focus { border: 1px solid #6c63ff; }
-        """)
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
         self.search_btn = QPushButton("Search")
-        self.search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #6c63ff; color: white;
-                border: none; border-radius: 4px;
-                padding: 8px 16px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #5a52d5; }
-        """)
+        self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
         layout.addLayout(search_row)
 
         self.results_label = QLabel("Results")
-        self.results_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.results_label.setProperty("cls", "muted")
         layout.addWidget(self.results_label)
 
         content_splitter = QSplitter(Qt.Horizontal)
 
         self.results_list = QListWidget()
-        self.results_list.setStyleSheet("""
-            QListWidget {
-                background-color: #1a1a2e; color: #e0e0e0;
-                border: 1px solid #333; border-radius: 4px; padding: 4px;
-            }
-            QListWidget::item {
-                padding: 8px; border-bottom: 1px solid #2a2a3e;
-            }
-            QListWidget::item:selected { background-color: #3a3a5e; }
-            QListWidget::item:hover { background-color: #2a2a4e; }
-        """)
         self.results_list.currentRowChanged.connect(self._on_result_select)
         content_splitter.addWidget(self.results_list)
 
@@ -168,13 +130,7 @@ class DeviceSearchPanel(QWidget):
 
         self.preview_label = QLabel("Select a result for details")
         self.preview_label.setWordWrap(True)
-        self.preview_label.setStyleSheet("""
-            QLabel {
-                background-color: #1a1a2e; color: #ccc;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 10px; font-size: 12px;
-            }
-        """)
+        self.preview_label.setProperty("cls", "muted")
         right_layout.addWidget(self.preview_label)
 
         right_layout.addStretch()

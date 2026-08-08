@@ -1,25 +1,38 @@
 import os
+import string
 import subprocess
 import platform
+import threading
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame, QFileDialog, QProgressBar, QSplitter,
-    QTextEdit, QInputDialog
+    QTextEdit, QInputDialog, QCheckBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QColor, QIcon
 from typing import List
 
 from found_it.fileindex.search import FileSearchEngine, SearchResult
+from found_it.utils.themes import get_palette, widget_qss, repolish
 
 
 class FileSearchPanel(QWidget):
+    _image_search_done = pyqtSignal(list, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.engine = FileSearchEngine()
+        self.palette = get_palette("Indigo")
         self._setup_ui()
         self._setup_timer()
+        self._image_search_done.connect(self._on_image_search_done)
+        self.apply_theme(self.palette)
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        self.setStyleSheet(widget_qss(palette))
+        repolish(self)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -28,63 +41,55 @@ class FileSearchPanel(QWidget):
 
         title = QLabel("File Search")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        title.setStyleSheet("color: #e0e0e0;")
+        title.setProperty("cls", "title")
         layout.addWidget(title)
 
         desc = QLabel("Describe a file or image to find it on your PC")
-        desc.setStyleSheet("color: #888; font-size: 11px;")
+        desc.setProperty("cls", "muted")
         layout.addWidget(desc)
 
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("e.g. 'vacation photo with mountains'")
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2a2a3e;
-                color: #e0e0e0;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QLineEdit:focus { border: 1px solid #6c63ff; }
-        """)
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
         self.search_btn = QPushButton("Search")
-        self.search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #6c63ff;
-                color: white; border: none;
-                border-radius: 4px; padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #5a52d5; }
-        """)
+        self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
+
+        self.image_search_btn = QPushButton("Search by Image")
+        self.image_search_btn.setProperty("cls", "secondary")
+        self.image_search_btn.setToolTip("Pick a picture and find visually similar indexed images")
+        self.image_search_btn.clicked.connect(self._search_by_image)
+        search_row.addWidget(self.image_search_btn)
         layout.addLayout(search_row)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #333;")
+        sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
+        self.full_pc_checkbox = QCheckBox("Scan entire PC (recommended)")
+        self.full_pc_checkbox.setChecked(True)
+        self.full_pc_checkbox.stateChanged.connect(self._update_folder_label)
+        layout.addWidget(self.full_pc_checkbox)
+
+        full_pc_hint = QLabel("Searches every drive on this PC (skipping system/app folders like "
+                               "Windows, Program Files, and AppData). Uncheck to scan only specific "
+                               "folders you pick below.")
+        full_pc_hint.setProperty("cls", "hint")
+        full_pc_hint.setWordWrap(True)
+        layout.addWidget(full_pc_hint)
+
         folder_row = QHBoxLayout()
-        self.folder_label = QLabel("No folders selected")
-        self.folder_label.setStyleSheet("color: #888; font-size: 11px;")
-        folder_row.addWidget(self.folder_label)
+        self.folder_label = QLabel("")
+        self.folder_label.setProperty("cls", "muted")
+        folder_row.addWidget(self.folder_label, 1)
 
         self.add_folder_btn = QPushButton("+ Add Folder")
-        self.add_folder_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 4px 12px; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
-        """)
+        self.add_folder_btn.setProperty("cls", "secondary")
         self.add_folder_btn.clicked.connect(self._add_folder)
         folder_row.addWidget(self.add_folder_btn)
 
@@ -100,66 +105,44 @@ class FileSearchPanel(QWidget):
         self.scan_btn.clicked.connect(self._start_scan)
         folder_row.addWidget(self.scan_btn)
 
+        self.cancel_scan_btn = QPushButton("Cancel")
+        self.cancel_scan_btn.setProperty("cls", "secondary")
+        self.cancel_scan_btn.setEnabled(False)
+        self.cancel_scan_btn.clicked.connect(self._cancel_scan)
+        folder_row.addWidget(self.cancel_scan_btn)
+
         self.add_image_btn = QPushButton("+ Add Image")
-        self.add_image_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 4px 12px; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
-            QPushButton:disabled { color: #555; }
-        """)
+        self.add_image_btn.setProperty("cls", "secondary")
         self.add_image_btn.clicked.connect(self._add_named_image)
         folder_row.addWidget(self.add_image_btn)
         layout.addLayout(folder_row)
 
         add_image_hint = QLabel('Or add one specific image and give it a name (e.g. "Passport") '
                                  'to jump straight to it later by typing that name.')
-        add_image_hint.setStyleSheet("color: #666; font-size: 10px;")
+        add_image_hint.setProperty("cls", "hint")
         add_image_hint.setWordWrap(True)
         layout.addWidget(add_image_hint)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #1a1a2e; border: 1px solid #333;
-                border-radius: 4px; text-align: center; color: #aaa;
-                max-height: 20px;
-            }
-            QProgressBar::chunk { background-color: #6c63ff; border-radius: 3px; }
-        """)
         layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.status_label.setProperty("cls", "hint")
         layout.addWidget(self.status_label)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet("color: #333;")
+        sep2.setProperty("cls", "sep")
         layout.addWidget(sep2)
 
         self.results_label = QLabel("Results")
-        self.results_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.results_label.setProperty("cls", "muted")
         layout.addWidget(self.results_label)
 
         content_splitter = QSplitter(Qt.Horizontal)
 
         self.results_list = QListWidget()
-        self.results_list.setStyleSheet("""
-            QListWidget {
-                background-color: #1a1a2e; color: #e0e0e0;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 4px;
-            }
-            QListWidget::item {
-                padding: 8px; border-bottom: 1px solid #2a2a3e;
-            }
-            QListWidget::item:selected { background-color: #3a3a5e; }
-            QListWidget::item:hover { background-color: #2a2a4e; }
-        """)
         self.results_list.currentRowChanged.connect(self._on_result_select)
         content_splitter.addWidget(self.results_list)
 
@@ -169,41 +152,19 @@ class FileSearchPanel(QWidget):
 
         self.preview_label = QLabel("Select a result to preview")
         self.preview_label.setWordWrap(True)
-        self.preview_label.setStyleSheet("""
-            QLabel {
-                background-color: #1a1a2e; color: #ccc;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 10px; font-size: 12px;
-            }
-        """)
+        self.preview_label.setProperty("cls", "muted")
         right_layout.addWidget(self.preview_label)
 
         btn_row = QHBoxLayout()
         self.open_btn = QPushButton("Open File")
         self.open_btn.setEnabled(False)
-        self.open_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
-            QPushButton:disabled { color: #555; }
-        """)
+        self.open_btn.setProperty("cls", "secondary")
         self.open_btn.clicked.connect(self._open_file)
         btn_row.addWidget(self.open_btn)
 
         self.open_dir_btn = QPushButton("Open Folder")
         self.open_dir_btn.setEnabled(False)
-        self.open_dir_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #aaa;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #3a3a5e; color: #e0e0e0; }
-            QPushButton:disabled { color: #555; }
-        """)
+        self.open_dir_btn.setProperty("cls", "secondary")
         self.open_dir_btn.clicked.connect(self._open_folder)
         btn_row.addWidget(self.open_dir_btn)
         right_layout.addLayout(btn_row)
@@ -215,33 +176,66 @@ class FileSearchPanel(QWidget):
 
         self._folders: List[str] = []
         self._results: List[SearchResult] = []
+        self._scan_was_cancelled = False
+        self._update_folder_label()
 
     def _setup_timer(self):
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_status)
         self._poll_timer.start(500)
 
+    def _get_all_drives(self) -> List[str]:
+        """Every locally reachable drive/volume root, so "Scan entire PC" isn't
+        limited to just the folders the user thought to add by hand."""
+        if platform.system() == "Windows":
+            return [f"{letter}:\\" for letter in string.ascii_uppercase
+                    if os.path.exists(f"{letter}:\\")]
+        return ["/"]
+
+    def _update_folder_label(self):
+        extra = f" + {len(self._folders)} extra folder(s)" if self._folders else ""
+        if self.full_pc_checkbox.isChecked():
+            self.folder_label.setText(f"Scanning: entire PC{extra}")
+        elif self._folders:
+            names = [os.path.basename(f) or f for f in self._folders]
+            self.folder_label.setText(f"Folders: {', '.join(names)}")
+        else:
+            self.folder_label.setText("No folders selected")
+
     def _add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select folder to index")
         if folder and folder not in self._folders:
             self._folders.append(folder)
-            names = [os.path.basename(f) for f in self._folders]
-            self.folder_label.setText(f"Folders: {', '.join(names)}")
+            self._update_folder_label()
 
     def _start_scan(self):
-        if not self._folders:
-            self.status_label.setText("Add folders first!")
+        if self.full_pc_checkbox.isChecked():
+            drives = self._get_all_drives()
+            roots = drives + [f for f in self._folders if f not in drives]
+        else:
+            roots = list(self._folders)
+
+        if not roots:
+            self.status_label.setText('Add folders first, or check "Scan entire PC".')
             return
 
+        self._scan_was_cancelled = False
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.scan_btn.setEnabled(False)
+        self.cancel_scan_btn.setEnabled(True)
 
         self.engine.start_indexing(
-            self._folders,
+            roots,
             progress_callback=self._on_progress,
             done_callback=self._on_scan_done
         )
+
+    def _cancel_scan(self):
+        self._scan_was_cancelled = True
+        self.cancel_scan_btn.setEnabled(False)
+        self.status_label.setText("Cancelling...")
+        self.engine.cancel()
 
     def _add_named_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -278,9 +272,11 @@ class FileSearchPanel(QWidget):
     def _on_scan_done(self, count):
         self.progress_bar.setVisible(False)
         self.scan_btn.setEnabled(True)
+        self.cancel_scan_btn.setEnabled(False)
         stats = self.engine.get_stats()
+        prefix = "Cancelled." if self._scan_was_cancelled else "Done!"
         self.status_label.setText(
-            f"Done! {stats['total']} files found, "
+            f"{prefix} {stats['total']} files found, "
             f"{stats['embedded']} indexed "
             f"({stats['images']} images, {stats['texts']} texts, {stats['codes']} code)"
         )
@@ -300,6 +296,48 @@ class FileSearchPanel(QWidget):
 
         self.status_label.setText(f"Searching for: {query}")
         self._results = self.engine.search(query, top_k=30)
+        self._show_results()
+
+    def _search_by_image(self):
+        if self.engine.is_indexing():
+            self.status_label.setText("Still indexing, please wait...")
+            return
+
+        if len(self.engine.store) == 0:
+            self.status_label.setText("No files indexed yet. Add folders and scan first.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select an image to search with",
+            "", "Images (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif)"
+        )
+        if not path:
+            return
+
+        self.image_search_btn.setEnabled(False)
+        self.search_btn.setEnabled(False)
+        self.status_label.setText(f"Searching for images like {os.path.basename(path)}...")
+
+        def worker():
+            results = self.engine.search_by_image(path, top_k=30)
+            self._image_search_done.emit(results, path)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_image_search_done(self, results, path):
+        self.image_search_btn.setEnabled(True)
+        self.search_btn.setEnabled(True)
+        self._results = results
+
+        if not results:
+            self.status_label.setText(
+                f"No visual matches found for {os.path.basename(path)} "
+                "(image search needs open-clip-torch installed)."
+            )
+        else:
+            self.status_label.setText(
+                f"Found {len(results)} visual match(es) for {os.path.basename(path)}"
+            )
         self._show_results()
 
     def _show_results(self):

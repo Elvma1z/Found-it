@@ -12,6 +12,8 @@ from PyQt5.QtGui import QFont
 
 from found_it.gui.splash import create_splash_screen, splash_show_message
 from found_it.gui.main_window import MainWindow
+from found_it.utils.app_settings import load_app_settings
+from found_it.utils.themes import get_palette
 
 
 def main():
@@ -19,7 +21,8 @@ def main():
 
     app.setStyle("Fusion")
 
-    font = QFont("Segoe UI", 10)
+    settings = load_app_settings()
+    font = QFont(settings.font_family, 10)
     app.setFont(font)
 
     app.setStyleSheet("""
@@ -30,7 +33,7 @@ def main():
         }
     """)
 
-    splash = create_splash_screen()
+    splash = create_splash_screen(get_palette(settings.theme))
     splash.show()
     splash_show_message(splash, "Starting up...")
     app.processEvents()

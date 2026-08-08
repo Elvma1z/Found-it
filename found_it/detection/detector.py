@@ -3,19 +3,30 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional
 
-from found_it.config import YOLO_MODEL, DETECTION_CONFIDENCE, SNAPSHOTS_DIR
+from found_it.config import YOLO_MODEL, DETECTION_CONFIDENCE, DETECTION_IMGSZ, SNAPSHOTS_DIR
 
 
 class ItemDetector:
     def __init__(self):
         self.model = None
+        self.device = "cpu"
+        self.half = False
         self._load_model()
 
     def _load_model(self):
         try:
             from ultralytics import YOLO
             self.model = YOLO(YOLO_MODEL)
-            print(f"[Detector] Loaded model: {YOLO_MODEL}")
+
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self.device = 0
+                    self.half = True
+            except ImportError:
+                pass
+
+            print(f"[Detector] Loaded model: {YOLO_MODEL} (device={self.device}, half={self.half})")
         except ImportError:
             print("[Detector] ultralytics not installed. Run: pip install ultralytics")
         except Exception as e:
@@ -23,10 +34,17 @@ class ItemDetector:
 
     def detect(self, frame: np.ndarray, camera_id: int,
                confidence: float = DETECTION_CONFIDENCE) -> List[dict]:
+        """Run inference and return detections. Snapshot crops are NOT saved
+        here - only the caller knows whether a detection is a brand-new item
+        worth writing to disk versus an already-tracked one re-detected on
+        this cycle, so snapshotting is left to save_snapshot()."""
         if self.model is None:
             return []
 
-        results = self.model(frame, conf=confidence, verbose=False)
+        kwargs = {"device": self.device}
+        if self.half:
+            kwargs["half"] = True
+        results = self.model(frame, conf=confidence, imgsz=DETECTION_IMGSZ, verbose=False, **kwargs)
         detections = []
 
         for result in results:
@@ -44,10 +62,6 @@ class ItemDetector:
                 center_x = (x1 + x2) / 2 / w
                 center_y = (y1 + y2) / 2 / h
 
-                snapshot_path = self._save_snapshot(
-                    frame, y1, y2, x1, x2, label, camera_id
-                )
-
                 detections.append({
                     "label": label,
                     "confidence": conf,
@@ -58,12 +72,11 @@ class ItemDetector:
                     "bbox_y1": y1,
                     "bbox_x2": x2,
                     "bbox_y2": y2,
-                    "snapshot_path": snapshot_path,
                 })
 
         return detections
 
-    def _save_snapshot(self, frame: np.ndarray, y1: int, y2: int,
+    def save_snapshot(self, frame: np.ndarray, y1: int, y2: int,
                        x1: int, x2: int, label: str,
                        camera_id: int) -> Optional[str]:
         try:

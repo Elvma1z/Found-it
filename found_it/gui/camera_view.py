@@ -4,15 +4,24 @@ from PyQt5.QtGui import QImage, QPixmap
 import numpy as np
 from typing import Optional
 
+from found_it.utils.themes import get_palette
+
 
 class CameraView(QLabel):
-    def __init__(self, camera_id: int, parent=None):
+    def __init__(self, camera_id: int, parent=None, palette: Optional[dict] = None):
         super().__init__(parent)
         self.camera_id = camera_id
         self.setMinimumSize(320, 240)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background-color: #1a1a2e; border: 2px solid #333; border-radius: 4px;")
+        self.apply_theme(palette or get_palette("Indigo"))
         self.setText(f"Camera {camera_id}\nNo signal")
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        p = palette
+        self.setStyleSheet(
+            f"background-color: {p['bg']}; border: 2px solid {p['border']}; border-radius: 4px; color: {p['text_dim']};"
+        )
 
     def update_frame(self, frame: Optional[np.ndarray]):
         if frame is None:
