@@ -8,3 +8,13 @@ numpy>=1.24.0
 open-clip-torch>=2.20.0
 sentence-transformers>=2.2.0
 pdfplumber>=0.10.0
+
+# Same-person face matching for named images (e.g. "me in the beanie")
+face_recognition>=1.3.0
+# face_recognition_models still imports the removed pkg_resources API -
+# pin below the setuptools version that dropped it.
+setuptools<81
+
+# Near-duplicate detection (resized/recompressed copies of the same photo,
+# e.g. thumbnail caches or cloud-sync copies) in search results
+ImageHash>=4.3.0

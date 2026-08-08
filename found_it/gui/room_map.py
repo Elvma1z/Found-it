@@ -3,6 +3,8 @@ from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush
 from typing import List, Tuple, Optional
 
+from found_it.utils.themes import get_palette
+
 
 class RoomMap(QWidget):
     PIN_COLORS = {
@@ -25,6 +27,11 @@ class RoomMap(QWidget):
         self.room_height = 4.0
         self.selected_item_id: Optional[int] = None
         self._padding = 40
+        self.palette = get_palette("Indigo")
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        self.update()
 
     def set_room_size(self, width: float, height: float):
         self.room_width = width
@@ -78,6 +85,7 @@ class RoomMap(QWidget):
         return room_x, room_y
 
     def paintEvent(self, event):
+        p = self.palette
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -85,31 +93,33 @@ class RoomMap(QWidget):
         ox, oy, room_px_w, room_px_h = int(ox), int(oy), int(room_px_w), int(room_px_h)
         room_rect = QRect(ox, oy, room_px_w, room_px_h)
 
-        painter.setPen(QPen(QColor(60, 60, 80), 2))
-        painter.setBrush(QBrush(QColor(20, 20, 35)))
+        painter.setPen(QPen(QColor(p["border"]), 2))
+        painter.setBrush(QBrush(QColor(p["bg"])))
         painter.drawRoundedRect(room_rect, 6, 6)
 
-        painter.setPen(QPen(QColor(80, 80, 100), 1, Qt.DashLine))
+        painter.setPen(QPen(QColor(p["border"]), 1, Qt.DashLine))
         for i in range(1, 3):
             x = ox + int(room_px_w * i / 3)
             painter.drawLine(x, oy, x, oy + room_px_h)
             y = oy + int(room_px_h * i / 3)
             painter.drawLine(ox, y, ox + room_px_w, y)
 
-        painter.setPen(QPen(QColor(120, 120, 160), 1))
+        painter.setPen(QPen(QColor(p["text_faint"]), 1))
         font = QFont("Segoe UI", 8)
         painter.setFont(font)
         for i in range(3):
             x = ox + int(room_px_w * (i + 0.5) / 3)
             painter.drawText(x - 10, oy + room_px_h + 15, f"{(i+1)/3:.1f}")
 
+        accent = QColor(p["accent"])
+        accent_hover = QColor(p["accent_hover"])
         for zone in self.zones:
             zx1, zy1 = self._room_to_pixel(zone["x1"], zone["y1"])
             zx2, zy2 = self._room_to_pixel(zone["x2"], zone["y2"])
-            painter.setPen(QPen(QColor(108, 99, 255), 1, Qt.DashLine))
-            painter.setBrush(QBrush(QColor(108, 99, 255, 30)))
+            painter.setPen(QPen(accent, 1, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 30)))
             painter.drawRect(zx1, zy1, zx2 - zx1, zy2 - zy1)
-            painter.setPen(QPen(QColor(180, 175, 255), 1))
+            painter.setPen(QPen(accent_hover, 1))
             font = QFont("Segoe UI", 7)
             painter.setFont(font)
             painter.drawText(zx1 + 4, zy1 + 12, zone.get("name", "Zone"))
@@ -165,7 +175,7 @@ class RoomMap(QWidget):
             label = item.get("label", "?")
             font = QFont("Segoe UI", 7)
             painter.setFont(font)
-            painter.setPen(QPen(QColor(200, 200, 200), 1))
+            painter.setPen(QPen(QColor(p["text_dim"]), 1))
             text_rect = QRect(px + 8, py - 8, 120, 16)
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                              f"{label} [cam{cam_id}]")

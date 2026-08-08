@@ -1,4 +1,4 @@
-﻿from PyQt5.QtWidgets import (
+from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame
@@ -8,6 +8,7 @@ from PyQt5.QtGui import QFont
 from typing import List
 
 from found_it.config import CAMERA_LABELS
+from found_it.utils.themes import get_palette, widget_qss, repolish
 
 
 class SearchPanel(QWidget):
@@ -18,11 +19,18 @@ class SearchPanel(QWidget):
         self.setMinimumWidth(280)
         self.setMaximumWidth(400)
         self._room_names: dict = {}
+        self.palette = get_palette("Indigo")
         self._setup_ui()
+        self.apply_theme(self.palette)
 
     def set_room_names(self, room_names: dict):
         """room_id -> room name, so results can show which tracked room an item was found in."""
         self._room_names = room_names
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        self.setStyleSheet(widget_qss(palette))
+        repolish(self)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -31,92 +39,41 @@ class SearchPanel(QWidget):
 
         title = QLabel("Find It")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        title.setStyleSheet("color: #e0e0e0;")
+        title.setProperty("cls", "title")
         layout.addWidget(title)
 
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Where are my keys?")
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2a2a3e;
-                color: #e0e0e0;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #6c63ff;
-            }
-        """)
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
         self.search_btn = QPushButton("Search")
-        self.search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #6c63ff;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #5a52d5; }
-        """)
+        self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
         layout.addLayout(search_row)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("color: #333;")
+        separator.setProperty("cls", "sep")
         layout.addWidget(separator)
 
         self.results_label = QLabel("All detected items")
-        self.results_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.results_label.setProperty("cls", "muted")
         layout.addWidget(self.results_label)
 
         self.results_list = QListWidget()
-        self.results_list.setStyleSheet("""
-            QListWidget {
-                background-color: #1a1a2e;
-                color: #e0e0e0;
-                border: 1px solid #333;
-                border-radius: 4px;
-                padding: 4px;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #2a2a3e;
-            }
-            QListWidget::item:selected {
-                background-color: #3a3a5e;
-            }
-            QListWidget::item:hover {
-                background-color: #2a2a4e;
-            }
-        """)
         self.results_list.itemClicked.connect(self._on_item_click)
         layout.addWidget(self.results_list)
 
         details_label = QLabel("Details")
-        details_label.setStyleSheet("color: #888; font-size: 11px; margin-top: 4px;")
+        details_label.setProperty("cls", "muted")
         layout.addWidget(details_label)
 
         self.detail_label = QLabel("Select an item for details")
         self.detail_label.setWordWrap(True)
-        self.detail_label.setStyleSheet("""
-            QLabel {
-                background-color: #1a1a2e;
-                color: #ccc;
-                border: 1px solid #333;
-                border-radius: 4px;
-                padding: 10px;
-                font-size: 12px;
-            }
-        """)
+        self.detail_label.setProperty("cls", "muted")
         layout.addWidget(self.detail_label)
 
         layout.addStretch()
@@ -156,7 +113,7 @@ class SearchPanel(QWidget):
             if room_name:
                 text += f"\n  Room: {room_name}"
             if zone_name:
-                text += f"\n  In: {zone_name}"
+                text += f"\n  {zone_name.capitalize()}"
             if last_seen:
                 text += f"\n  Last seen: {last_seen}"
 
@@ -170,7 +127,7 @@ class SearchPanel(QWidget):
         cam = item.get("camera_id", 0)
         cam_label = CAMERA_LABELS.get(cam, f"cam{cam}")
         room_name = self._room_names.get(item.get("room_id"), item.get("room_id") or "unknown room")
-        zone_name = item.get("zone_name") or "unmarked area"
+        zone_name = item.get("zone_name") or "in an unmarked area"
         zx = item.get("zone_x", 0)
         zy = item.get("zone_y", 0)
         first = item.get("first_seen", "")[:16]
@@ -180,7 +137,7 @@ class SearchPanel(QWidget):
             f"Item: {label}\n"
             f"Confidence: {conf:.1%}\n"
             f"Room: {room_name}\n"
-            f"In: {zone_name}\n"
+            f"Location: {zone_name.capitalize()}\n"
             f"Camera: {cam_label}\n"
             f"Position: ({zx:.2f}, {zy:.2f})\n"
             f"First seen: {first}\n"

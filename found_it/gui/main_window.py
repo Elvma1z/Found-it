@@ -1,26 +1,10 @@
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QCheckBox, QTabWidget,
-    QPushButton, QMenu, QDockWidget
+    QPushButton, QMenu, QDockWidget, QComboBox
 )
-from PyQt5.QtCore import Qt, QTimer, QByteArray, QEvent
+from PyQt5.QtCore import Qt, QTimer, QThread, QByteArray, QEvent
 from PyQt5.QtGui import QFont
-
-WINDOW_BTN_STYLE = """
-    QPushButton {
-        background: transparent; color: #999; border: none;
-        font-size: 13px; font-weight: bold;
-    }
-    QPushButton:hover { background-color: #2a2a3e; color: #e0e0e0; }
-"""
-
-WINDOW_CLOSE_BTN_STYLE = """
-    QPushButton {
-        background: transparent; color: #999; border: none;
-        font-size: 13px; font-weight: bold;
-    }
-    QPushButton:hover { background-color: #e53935; color: white; }
-"""
 
 
 class TitleBar(QWidget):
@@ -56,6 +40,7 @@ from found_it.storage.database import Database
 from found_it.storage.models import DetectedItem
 from found_it.utils.room_profiles import load_room_profiles
 from found_it.utils.app_settings import load_app_settings, save_app_settings
+from found_it.utils.themes import get_palette, repolish
 from found_it.gui.camera_view import CameraView
 from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
@@ -63,6 +48,7 @@ from found_it.gui.file_search_panel import FileSearchPanel
 from found_it.gui.device_search_panel import DeviceSearchPanel
 from found_it.gui.room_setup_panel import RoomSetupPanel
 from found_it.gui.settings_panel import SettingsPanel
+from found_it.gui.detection_worker import DetectionWorker
 
 
 class MainWindow(QMainWindow):
@@ -75,6 +61,7 @@ class MainWindow(QMainWindow):
 
         self.room_profiles = load_room_profiles()
         self.app_settings = load_app_settings()
+        self.palette = get_palette(self.app_settings.theme)
         self.active_room_id = self._resolve_active_room_id()
         self.db = Database()
         self.detector = ItemDetector()
@@ -82,7 +69,6 @@ class MainWindow(QMainWindow):
         self.room_cameras = {}
         self.room_dewarpers = {}
         self.cam_views = {}
-        self._frame_count = 0
 
         self._setup_ui()
         self._setup_timers()
@@ -96,6 +82,18 @@ class MainWindow(QMainWindow):
             return self.app_settings.active_room_id
         return self.room_profiles[0].id
 
+    def _nav_button_style(self, extra: str = "") -> str:
+        p = self.palette
+        return f"""
+            QPushButton {{
+                background: transparent; color: {p['text_dim']}; border: none;
+                padding: 8px 20px; font-size: 13px; font-weight: bold;
+                border-radius: 4px; {extra}
+            }}
+            QPushButton:checked {{ background-color: {p['selected']}; color: {p['text']}; }}
+            QPushButton:hover {{ color: {p['text']}; }}
+        """
+
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -103,73 +101,35 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        nav_bar = TitleBar()
-        nav_bar.setFixedHeight(48)
-        nav_bar.setStyleSheet("background-color: #0d0d1a; border-bottom: 1px solid #222;")
-        nav_layout = QHBoxLayout(nav_bar)
+        self.nav_bar = TitleBar()
+        self.nav_bar.setFixedHeight(48)
+        nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(12, 0, 0, 0)
 
-        app_title = QLabel("Found It")
-        app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        app_title.setStyleSheet("color: #6c63ff;")
-        nav_layout.addWidget(app_title)
+        self.app_title = QLabel("Found It")
+        self.app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        nav_layout.addWidget(self.app_title)
 
         nav_layout.addSpacing(24)
 
         self.mode_room_btn = QPushButton("Room Tracker")
         self.mode_room_btn.setCheckable(True)
         self.mode_room_btn.setChecked(True)
-        self.mode_room_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888; border: none;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
-            QPushButton:hover { color: #ccc; }
-        """)
         self.mode_room_btn.clicked.connect(lambda: self._switch_mode("room"))
         nav_layout.addWidget(self.mode_room_btn)
 
         self.mode_room_setup_btn = QPushButton("Room Setup")
         self.mode_room_setup_btn.setCheckable(True)
-        self.mode_room_setup_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888; border: none;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
-            QPushButton:hover { color: #ccc; }
-        """)
         self.mode_room_setup_btn.clicked.connect(lambda: self._switch_mode("room_setup"))
         nav_layout.addWidget(self.mode_room_setup_btn)
 
         self.mode_file_btn = QPushButton("File Search")
         self.mode_file_btn.setCheckable(True)
-        self.mode_file_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888; border: none;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
-            QPushButton:hover { color: #ccc; }
-        """)
         self.mode_file_btn.clicked.connect(lambda: self._switch_mode("file"))
         nav_layout.addWidget(self.mode_file_btn)
 
         self.mode_device_btn = QPushButton("Other Devices")
         self.mode_device_btn.setCheckable(True)
-        self.mode_device_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888; border: none;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
-            QPushButton:hover { color: #ccc; }
-        """)
         self.mode_device_btn.clicked.connect(lambda: self._switch_mode("device"))
         nav_layout.addWidget(self.mode_device_btn)
 
@@ -179,15 +139,6 @@ class MainWindow(QMainWindow):
         self.settings_btn.setCheckable(True)
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.setFixedWidth(36)
-        self.settings_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: #888; border: none;
-                padding: 8px; font-size: 16px; font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:checked { background-color: #2a2a3e; color: #e0e0e0; }
-            QPushButton:hover { color: #ccc; }
-        """)
         self.settings_btn.clicked.connect(lambda: self._switch_mode("settings"))
         nav_layout.addWidget(self.settings_btn)
 
@@ -196,25 +147,22 @@ class MainWindow(QMainWindow):
         self.minimize_btn = QPushButton("─")
         self.minimize_btn.setFixedSize(44, 48)
         self.minimize_btn.setToolTip("Minimize")
-        self.minimize_btn.setStyleSheet(WINDOW_BTN_STYLE)
         self.minimize_btn.clicked.connect(self.showMinimized)
         nav_layout.addWidget(self.minimize_btn)
 
         self.maximize_btn = QPushButton("☐")
         self.maximize_btn.setFixedSize(44, 48)
         self.maximize_btn.setToolTip("Maximize")
-        self.maximize_btn.setStyleSheet(WINDOW_BTN_STYLE)
         self.maximize_btn.clicked.connect(self._toggle_maximize)
         nav_layout.addWidget(self.maximize_btn)
 
         self.close_btn = QPushButton("✕")
         self.close_btn.setFixedSize(44, 48)
         self.close_btn.setToolTip("Close")
-        self.close_btn.setStyleSheet(WINDOW_CLOSE_BTN_STYLE)
         self.close_btn.clicked.connect(self.close)
         nav_layout.addWidget(self.close_btn)
 
-        main_layout.addWidget(nav_bar)
+        main_layout.addWidget(self.nav_bar)
 
         self.content_stack = QWidget()
         self.content_layout = QVBoxLayout(self.content_stack)
@@ -244,30 +192,120 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.content_stack)
 
-        self.statusBar().setStyleSheet("color: #666; background: #111;")
         self.statusBar().showMessage("Ready")
 
-        self.setStyleSheet("""
-            QMainWindow { background-color: #111122; }
-            QSplitter::handle { background-color: #222; }
+        self._apply_theme()
+
+    def _apply_theme(self):
+        p = self.palette
+
+        self.nav_bar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
+        self.app_title.setStyleSheet(f"color: {p['accent']};")
+
+        nav_style = self._nav_button_style()
+        for btn in (self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn, self.mode_device_btn):
+            btn.setStyleSheet(nav_style)
+        self.settings_btn.setStyleSheet(self._nav_button_style("font-size: 16px; padding: 8px;"))
+
+        window_btn_style = f"""
+            QPushButton {{
+                background: transparent; color: {p['text_faint']}; border: none;
+                font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {p['selected']}; color: {p['text']}; }}
+        """
+        self.minimize_btn.setStyleSheet(window_btn_style)
+        self.maximize_btn.setStyleSheet(window_btn_style)
+        self.close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {p['text_faint']}; border: none;
+                font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: #e53935; color: white; }}
         """)
+
+        self.statusBar().setStyleSheet(f"color: {p['text_faint']}; background: {p['header']};")
+
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {p['bg']}; }}
+            QSplitter::handle {{ background-color: {p['border']}; }}
+        """)
+
+        self.room_widget.setStyleSheet(f"""
+            QMainWindow::separator {{ background: {p['border']}; width: 4px; height: 4px; }}
+            QMainWindow::separator:hover {{ background: {p['accent']}; }}
+            QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
+            QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
+            QTabBar {{ background: {p['header']}; }}
+            QTabBar::tab {{
+                background: {p['panel']}; color: {p['text_dim']};
+                padding: 6px 16px; border: 1px solid {p['border']};
+                border-bottom: none; border-radius: 4px 4px 0 0;
+            }}
+            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:hover {{ color: {p['text']}; }}
+            QMenuBar {{ background: {p['header']}; color: {p['text_dim']}; border-bottom: 1px solid {p['border']}; }}
+            QMenuBar::item {{ padding: 4px 10px; }}
+            QMenuBar::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QMenu {{ background: {p['panel']}; color: {p['text_dim']}; border: 1px solid {p['border']}; }}
+            QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
+        """)
+
+        self.cam_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {p['border']}; background: {p['bg']}; }}
+            QTabBar::tab {{
+                background: {p['panel']}; color: {p['text_dim']};
+                padding: 6px 16px; border: 1px solid {p['border']};
+                border-bottom: none; border-radius: 4px 4px 0 0;
+            }}
+            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+        """)
+
+        self.main_room_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {p['selected']}; color: {p['text']};
+                border: 1px solid {p['border']}; border-radius: 4px;
+                padding: 4px 12px; font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {p['hover']}; }}
+            QPushButton::menu-indicator {{ width: 0px; }}
+        """)
+
+        self.dewarp_check.setStyleSheet(f"color: {p['text_dim']};")
+        self.map_title.setStyleSheet(f"color: {p['text']};")
+
+        self.room_map_selector.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {p['panel']}; color: {p['text']};
+                border: 1px solid {p['border']}; border-radius: 4px;
+                padding: 4px 8px; font-size: 12px;
+            }}
+            QComboBox:hover {{ background-color: {p['hover']}; }}
+            QComboBox QAbstractItemView {{
+                background-color: {p['panel']}; color: {p['text']};
+                border: 1px solid {p['border']};
+                selection-background-color: {p['selected']};
+                selection-color: {p['text']};
+                outline: none;
+            }}
+        """)
+
+        self.room_map.apply_theme(p)
+        self.search_panel.apply_theme(p)
+        self.room_setup_panel.apply_theme(p)
+        self.file_search_panel.apply_theme(p)
+        self.device_search_panel.apply_theme(p)
+        self.settings_panel.apply_theme(p)
+        for view in self.cam_views.values():
+            view.apply_theme(p)
+
+        repolish(self)
 
     def _build_room_view(self):
         tracker = QMainWindow()
         tracker.setDockOptions(
             QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks
         )
-        tracker.setStyleSheet("""
-            QMainWindow::separator { background: #222; width: 4px; height: 4px; }
-            QMainWindow::separator:hover { background: #6c63ff; }
-            QDockWidget { color: #e0e0e0; font-size: 12px; font-weight: bold; }
-            QDockWidget::title { background: #0d0d1a; padding: 6px 8px; border-bottom: 1px solid #222; }
-            QMenuBar { background: #0d0d1a; color: #aaa; border-bottom: 1px solid #222; }
-            QMenuBar::item { padding: 4px 10px; }
-            QMenuBar::item:selected { background: #2a2a3e; color: #e0e0e0; }
-            QMenu { background: #1a1a2e; color: #ccc; border: 1px solid #333; }
-            QMenu::item:selected { background: #2a2a3e; color: #e0e0e0; }
-        """)
 
         view_menu = tracker.menuBar().addMenu("View")
 
@@ -279,33 +317,14 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.dewarp_check = QCheckBox("Dewarp")
         self.dewarp_check.setChecked(self.app_settings.dewarp_default)
-        self.dewarp_check.setStyleSheet("color: #aaa;")
         controls.addWidget(self.dewarp_check)
         controls.addStretch()
         camera_layout.addLayout(controls)
 
         self.cam_tabs = QTabWidget()
-        self.cam_tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #333; background: #111; }
-            QTabBar::tab {
-                background: #1a1a2e; color: #888;
-                padding: 6px 16px; border: 1px solid #333;
-                border-bottom: none; border-radius: 4px 4px 0 0;
-            }
-            QTabBar::tab:selected { background: #2a2a3e; color: #e0e0e0; }
-        """)
 
         active_profile = self._get_profile(self.active_room_id)
         self.main_room_btn = QPushButton(active_profile.name)
-        self.main_room_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2a2a3e; color: #e0e0e0;
-                border: 1px solid #444; border-radius: 4px;
-                padding: 4px 12px; font-size: 12px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #3a3a5e; }
-            QPushButton::menu-indicator { width: 0px; }
-        """)
         self.main_room_btn.clicked.connect(self._show_room_menu)
         self.cam_tabs.setCornerWidget(self.main_room_btn, Qt.TopRightCorner)
         camera_layout.addWidget(self.cam_tabs)
@@ -339,10 +358,16 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(4, 8, 4, 8)
 
         map_header = QHBoxLayout()
-        map_title = QLabel("Room Map")
-        map_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        map_title.setStyleSheet("color: #e0e0e0;")
-        map_header.addWidget(map_title)
+        self.map_title = QLabel("Room Map")
+        self.map_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        map_header.addWidget(self.map_title)
+
+        self.room_map_selector = QComboBox()
+        self.room_map_selector.setMinimumWidth(140)
+        self._refresh_room_map_selector()
+        self.room_map_selector.currentIndexChanged.connect(self._on_room_map_selector_changed)
+        map_header.addWidget(self.room_map_selector)
+
         map_header.addStretch()
 
         self.status_indicator = QLabel("Scanning...")
@@ -411,6 +436,24 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked, rid=profile.id: self._switch_display_room(rid))
         menu.exec_(self.main_room_btn.mapToGlobal(self.main_room_btn.rect().bottomLeft()))
 
+    def _refresh_room_map_selector(self):
+        """Repopulate the room dropdown next to the "Room Map" heading from
+        the rooms currently defined in Room Setup, and select whichever one
+        is being displayed."""
+        self.room_map_selector.blockSignals(True)
+        self.room_map_selector.clear()
+        for profile in self.room_profiles:
+            self.room_map_selector.addItem(profile.name, profile.id)
+        index = self.room_map_selector.findData(self.active_room_id)
+        if index >= 0:
+            self.room_map_selector.setCurrentIndex(index)
+        self.room_map_selector.blockSignals(False)
+
+    def _on_room_map_selector_changed(self, index: int):
+        room_id = self.room_map_selector.itemData(index)
+        if room_id is not None:
+            self._switch_display_room(room_id)
+
     def _switch_display_room(self, room_id: str):
         if room_id == self.active_room_id or self._get_profile(room_id) is None:
             return
@@ -421,6 +464,13 @@ class MainWindow(QMainWindow):
 
     def _on_settings_updated(self):
         self.app_settings = load_app_settings()
+        # load_app_settings() returns a new object each time, so the
+        # detection worker thread (which was handed the old one) needs its
+        # reference refreshed too, or it'd keep using stale confidence/
+        # frame-skip/dewarp values forever.
+        self.detection_worker.app_settings = self.app_settings
+        self.palette = get_palette(self.app_settings.theme)
+        self._apply_theme()
         self.dewarp_check.setChecked(self.app_settings.dewarp_default)
         self._start_all_room_cameras()
 
@@ -429,7 +479,11 @@ class MainWindow(QMainWindow):
         self.device_search_panel.connect_saved_device(serial)
 
     def _on_room_updated(self):
-        self.room_profiles = load_room_profiles()
+        # Mutate the existing list in place rather than rebinding
+        # self.room_profiles - the detection worker thread holds a direct
+        # reference to this same list object so it always sees current
+        # rooms without needing to be re-wired every time they change.
+        self.room_profiles[:] = load_room_profiles()
         if self._get_profile(self.active_room_id) is None:
             self.active_room_id = self.room_profiles[0].id
             self.app_settings.active_room_id = self.active_room_id
@@ -442,9 +496,23 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.reload_profiles()
 
     def _setup_timers(self):
-        self._detect_timer = QTimer()
-        self._detect_timer.timeout.connect(self._detection_cycle)
-        self._detect_timer.start(100)
+        # Detection (camera capture -> dewarp -> YOLO inference -> merge)
+        # runs on its own QThread so a slow inference pass doesn't freeze
+        # the UI. Results come back via cycle_done, handled on this
+        # (the GUI) thread since DB writes and widget updates must be.
+        self.detection_worker = DetectionWorker(self.detector, self.app_settings)
+        self.detection_worker.room_profiles = self.room_profiles
+        self.detection_worker.room_cameras = self.room_cameras
+        self.detection_worker.room_dewarpers = self.room_dewarpers
+        self.detection_worker.room_mappers = self.room_mappers
+        self.detection_worker.dewarp_enabled = self.dewarp_check.isChecked()
+        self.detection_worker.cycle_done.connect(self._on_detection_cycle_done)
+        self.dewarp_check.toggled.connect(self._on_dewarp_toggled)
+
+        self._detection_thread = QThread(self)
+        self.detection_worker.moveToThread(self._detection_thread)
+        self._detection_thread.started.connect(self.detection_worker.start)
+        self._detection_thread.start()
 
         self._display_timer = QTimer()
         self._display_timer.timeout.connect(self._display_cycle)
@@ -465,9 +533,12 @@ class MainWindow(QMainWindow):
             for cam in cams.values():
                 cam.stop()
 
-        self.room_cameras = {}
-        self.room_dewarpers = {}
-        self.room_mappers = {}
+        # Clear in place rather than rebinding - the detection worker
+        # thread holds direct references to these same dict objects, so
+        # replacing them here would leave it watching stale, empty dicts.
+        self.room_cameras.clear()
+        self.room_dewarpers.clear()
+        self.room_mappers.clear()
         used_device_ids = {}
 
         for profile in self.room_profiles:
@@ -528,7 +599,7 @@ class MainWindow(QMainWindow):
             if cam_id not in cams:
                 continue
             label = cam_cfg.get("label", f"Camera {cam_id}")
-            view = CameraView(cam_id)
+            view = CameraView(cam_id, palette=self.palette)
             self.cam_tabs.addTab(view, label)
             self.cam_views[cam_id] = view
 
@@ -536,37 +607,20 @@ class MainWindow(QMainWindow):
         self.room_map.set_zones(profile.zones)
         self.room_map.set_cameras(profile.cameras)
         self.main_room_btn.setText(profile.name)
+        self._refresh_room_map_selector()
 
-    def _detection_cycle(self):
-        self._frame_count += 1
-        if self._frame_count % self.app_settings.detection_frame_skip != 0:
-            return
+    def _on_dewarp_toggled(self, checked: bool):
+        self.detection_worker.dewarp_enabled = checked
 
-        total_detections = 0
-
-        for profile in self.room_profiles:
-            cams = self.room_cameras.get(profile.id, {})
-            if not cams:
-                continue
-            dewarpers = self.room_dewarpers.get(profile.id, {})
-            mapper = self.room_mappers.get(profile.id)
+    def _on_detection_cycle_done(self, results: list, total_detections: int):
+        """Runs on the GUI thread (queued signal from the detection worker
+        thread) - this is where DB writes and status text updates happen,
+        since sqlite connections and widgets aren't thread-safe to touch
+        from the worker."""
+        for profile_id, merged, frames_by_cam in results:
+            mapper = self.room_mappers.get(profile_id)
             if mapper is None:
                 continue
-
-            all_detections_per_cam = []
-            for cam_id, cam in cams.items():
-                frame = cam.get_frame()
-                if frame is None:
-                    continue
-
-                if self.dewarp_check.isChecked() and cam_id in dewarpers:
-                    frame = dewarpers[cam_id].dewarp(frame)
-
-                detections = self.detector.detect(frame, cam_id, confidence=self.app_settings.detection_confidence)
-                all_detections_per_cam.append(detections)
-
-            merged = mapper.merge_detections(all_detections_per_cam)
-            total_detections += len(merged)
 
             for det in merged:
                 room_x, room_y = mapper.pixel_to_room(
@@ -576,7 +630,7 @@ class MainWindow(QMainWindow):
 
                 existing = self.db.find_matching_item(
                     det["label"], det["camera_id"],
-                    det["zone_x"], det["zone_y"], profile.id
+                    det["zone_x"], det["zone_y"], profile_id
                 )
 
                 if existing:
@@ -585,6 +639,17 @@ class MainWindow(QMainWindow):
                         det["confidence"], zone_name
                     )
                 else:
+                    # Only new items are worth the disk write - an item that's
+                    # already tracked gets re-detected every cycle it sits
+                    # still, and update_item_position() never touches
+                    # snapshot_path, so snapshotting it again would be wasted I/O.
+                    snapshot_path = None
+                    cam_frame = frames_by_cam.get(det["camera_id"])
+                    if cam_frame is not None:
+                        snapshot_path = self.detector.save_snapshot(
+                            cam_frame, det["bbox_y1"], det["bbox_y2"],
+                            det["bbox_x1"], det["bbox_x2"], det["label"], det["camera_id"]
+                        )
                     item = DetectedItem(
                         label=det["label"],
                         confidence=det["confidence"],
@@ -595,9 +660,9 @@ class MainWindow(QMainWindow):
                         bbox_y1=det["bbox_y1"],
                         bbox_x2=det["bbox_x2"],
                         bbox_y2=det["bbox_y2"],
-                        snapshot_path=det.get("snapshot_path"),
+                        snapshot_path=snapshot_path,
                         zone_name=zone_name,
-                        room_id=profile.id,
+                        room_id=profile_id,
                     )
                     self.db.insert_item(item)
 
@@ -668,6 +733,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_room_tracker_layout()
+        self.room_setup_panel.save_layout()
+        self._detection_thread.quit()
+        self._detection_thread.wait(2000)
         for cams in self.room_cameras.values():
             for cam in cams.values():
                 cam.stop()

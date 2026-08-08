@@ -1,7 +1,7 @@
 import numpy as np
 from pathlib import Path
 from typing import Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -13,6 +13,7 @@ class FileEmbedding:
     text_preview: str = ""
     size_bytes: int = 0
     modified_time: float = 0
+    face_encodings: List[np.ndarray] = field(default_factory=list)
 
 
 class EmbeddingStore:
@@ -113,11 +114,13 @@ class EmbeddingStore:
         self.embeddings = [e for e in self.embeddings if e.path != path]
 
     def search(self, query_embedding: np.ndarray,
-               top_k: int = 20) -> List[tuple]:
-        if not self.embeddings:
+               top_k: int = 20, file_type: Optional[str] = None) -> List[tuple]:
+        candidates = [e for e in self.embeddings
+                      if file_type is None or e.file_type == file_type]
+        if not candidates:
             return []
 
-        stored = np.array([e.embedding for e in self.embeddings])
+        stored = np.array([e.embedding for e in candidates])
 
         similarities = stored @ query_embedding
 
@@ -125,7 +128,7 @@ class EmbeddingStore:
 
         results = []
         for idx in top_indices:
-            results.append((self.embeddings[idx], float(similarities[idx])))
+            results.append((candidates[idx], float(similarities[idx])))
 
         return results
 

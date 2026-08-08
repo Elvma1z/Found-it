@@ -1,5 +1,6 @@
 ﻿import cv2
 import numpy as np
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -91,6 +92,11 @@ class EquirectangularDewarp:
         self.fov = fov
         self.num_views = num_views
         self._maps: list = []
+        # dewarp()/dewarp_single() can now be called concurrently - the
+        # detection worker thread and the main thread's display cycle both
+        # dewarp frames from the same camera - and map-building is lazy on
+        # first call, so guard it against a torn/partial build.
+        self._maps_lock = threading.Lock()
 
     def _build_maps(self, equirect_w: int, equirect_h: int,
                     out_w: int, out_h: int):
@@ -143,15 +149,19 @@ class EquirectangularDewarp:
         ], dtype=np.float64)
         return R
 
+    def _ensure_maps(self, w: int, h: int, out_w: int, out_h: int) -> list:
+        with self._maps_lock:
+            if not self._maps or self._maps[0][0].shape != (out_h, out_w):
+                self._build_maps(w, h, out_w, out_h)
+            return self._maps
+
     def dewarp(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
         out_w, out_h = w // 2, h // 2
-
-        if not self._maps or self._maps[0][0].shape != (out_h, out_w):
-            self._build_maps(w, h, out_w, out_h)
+        maps = self._ensure_maps(w, h, out_w, out_h)
 
         views = []
-        for map_x, map_y in self._maps:
+        for map_x, map_y in maps:
             view = cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_WRAP)
             views.append(view)
@@ -163,11 +173,9 @@ class EquirectangularDewarp:
     def dewarp_single(self, frame: np.ndarray, direction_index: int = 0) -> np.ndarray:
         h, w = frame.shape[:2]
         out_w, out_h = w // 2, h // 2
+        maps = self._ensure_maps(w, h, out_w, out_h)
 
-        if not self._maps or self._maps[0][0].shape != (out_h, out_w):
-            self._build_maps(w, h, out_w, out_h)
-
-        idx = direction_index % len(self._maps)
-        map_x, map_y = self._maps[idx]
+        idx = direction_index % len(maps)
+        map_x, map_y = maps[idx]
         return cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_WRAP)

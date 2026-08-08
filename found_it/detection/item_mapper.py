@@ -3,6 +3,22 @@ from typing import List, Optional, Tuple
 
 from found_it.storage.models import DetectedItem, RoomConfig
 
+# How close (in meters) a detection needs to be to an unrelated zone before
+# it's worth telling the user "near the X" instead of a bare grid label.
+NEARBY_ZONE_THRESHOLD_M = 1.2
+
+# Zone names containing these words read better with "in" than "on"
+# (e.g. "in the Closet" vs. "on the Closet"). Anything else defaults to "on".
+_IN_HINTS = (
+    "closet", "cabinet", "drawer", "box", "bin", "basket",
+    "fridge", "refrigerator", "bag", "backpack", "shelf unit", "hamper",
+)
+
+
+def _preposition_for(zone_name: str) -> str:
+    lowered = zone_name.lower()
+    return "in" if any(hint in lowered for hint in _IN_HINTS) else "on"
+
 
 class ItemMapper:
     def __init__(self, room_config: RoomConfig):
@@ -45,11 +61,20 @@ class ItemMapper:
         tolerance = 0.2
         used = [set() for _ in all_detections]
 
+        # Each detection's room position only depends on itself, not on what
+        # it's being compared against, so compute it once per detection
+        # instead of on every pairwise comparison in the loop below.
+        room_coords = [
+            [self.pixel_to_room(det["zone_x"], det["zone_y"], det["camera_id"]) for det in dets]
+            for dets in all_detections
+        ]
+
         for i, dets_a in enumerate(all_detections):
             for j, det_a in enumerate(dets_a):
                 best_match = None
                 best_cam = -1
                 best_idx = -1
+                room_a = room_coords[i][j]
 
                 for k, dets_b in enumerate(all_detections):
                     if k == i:
@@ -58,12 +83,7 @@ class ItemMapper:
                         if l in used[k]:
                             continue
                         if det_a["label"] == det_b["label"]:
-                            room_a = self.pixel_to_room(
-                                det_a["zone_x"], det_a["zone_y"], det_a["camera_id"]
-                            )
-                            room_b = self.pixel_to_room(
-                                det_b["zone_x"], det_b["zone_y"], det_b["camera_id"]
-                            )
+                            room_b = room_coords[k][l]
                             dist = math.sqrt(
                                 (room_a[0] - room_b[0]) ** 2 +
                                 (room_a[1] - room_b[1]) ** 2
@@ -87,6 +107,17 @@ class ItemMapper:
 
         return merged
 
+    def get_nearest_zone(self, room_x: float, room_y: float) -> Optional[Tuple[str, float]]:
+        """Closest zone to a point, by distance to its nearest edge (0 if inside)."""
+        best = None
+        for zone in self.room.zones:
+            nearest_x = min(max(room_x, zone["x1"]), zone["x2"])
+            nearest_y = min(max(room_y, zone["y1"]), zone["y2"])
+            dist = math.hypot(room_x - nearest_x, room_y - nearest_y)
+            if best is None or dist < best[1]:
+                best = (zone["name"], dist)
+        return best
+
     def get_zone_name(self, room_x: float, room_y: float) -> str:
         for zone in self.room.zones:
             if (zone["x1"] <= room_x <= zone["x2"] and
@@ -94,8 +125,8 @@ class ItemMapper:
                 for drawer in zone.get("drawers", []):
                     if (drawer["x1"] <= room_x <= drawer["x2"] and
                             drawer["y1"] <= room_y <= drawer["y2"]):
-                        return f"{drawer['name']} ({zone['name']})"
-                return zone["name"]
+                        return f"in the {drawer['name']} drawer of the {zone['name']}"
+                return f"{_preposition_for(zone['name'])} the {zone['name']}"
 
         rel_x = room_x / self.room.width_m
         rel_y = room_y / self.room.height_m
@@ -114,4 +145,10 @@ class ItemMapper:
         else:
             row = "bottom"
 
-        return f"{row}-{col}"
+        grid_label = f"in the {row}-{col} of the room"
+
+        nearest = self.get_nearest_zone(room_x, room_y)
+        if nearest is not None and nearest[1] <= NEARBY_ZONE_THRESHOLD_M:
+            return f"near the {nearest[0]} ({row}-{col})"
+
+        return grid_label
