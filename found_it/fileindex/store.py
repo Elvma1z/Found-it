@@ -133,8 +133,16 @@ class EmbeddingStore:
 
     def search(self, query_embedding: np.ndarray,
                top_k: int = 20, file_type: Optional[str] = None) -> List[tuple]:
+        # CLIP (image) and SentenceTransformer (text/code) embeddings live in
+        # different vector spaces with different dimensions - stacking both
+        # into one array for a dot product would crash (inhomogeneous shape)
+        # or, if numpy let it through, produce meaningless cross-space
+        # scores. Only ever compare candidates whose embedding dimension
+        # matches the query's.
+        query_dim = query_embedding.shape[-1]
         candidates = [e for e in self.embeddings
-                      if file_type is None or e.file_type == file_type]
+                      if (file_type is None or e.file_type == file_type)
+                      and e.embedding.shape[-1] == query_dim]
         if not candidates:
             return []
 
