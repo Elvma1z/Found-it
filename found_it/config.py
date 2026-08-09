@@ -1,7 +1,14 @@
 ﻿import os
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # PyInstaller extracts bundled modules to a temp dir that's wiped on
+    # exit, so __file__ can't locate persistent storage. Anchor to the exe
+    # itself, which lives in the actual install directory.
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_DIR = DATA_DIR / "db"
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
@@ -14,7 +21,7 @@ INDEX_DB_PATH = DB_DIR / "file_index.db"
 CAMERA_RESOLUTION = (640, 480)
 CAMERA_FPS = 15
 
-YOLO_MODEL = "yolov8n.pt"
+YOLO_MODEL = str(BASE_DIR / "yolov8n.pt")
 DETECTION_CONFIDENCE = 0.4
 DETECTION_FRAME_SKIP = 3
 DETECTION_IMGSZ = 480

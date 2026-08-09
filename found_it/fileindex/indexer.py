@@ -5,14 +5,15 @@ from pathlib import Path
 from typing import List, Callable, Optional
 from dataclasses import dataclass, field
 
-from found_it.config import DATA_DIR
+from found_it.config import DATA_DIR, BASE_DIR
 
 
 # This app's own project root (source, venvs, and PyInstaller build/dist
-# output). Never worth indexing as "the user's files" - if it happens to sit
-# under a folder the user picks (e.g. a Documents\GitHub checkout), its
-# bundled dependency copies would otherwise dwarf real personal content.
-APP_ROOT = Path(__file__).resolve().parents[2]
+# output, or the installed app's folder when frozen). Never worth indexing
+# as "the user's files" - if it happens to sit under a folder the user picks
+# (e.g. a Documents\GitHub checkout), its bundled dependency copies would
+# otherwise dwarf real personal content.
+APP_ROOT = BASE_DIR
 
 
 @dataclass
