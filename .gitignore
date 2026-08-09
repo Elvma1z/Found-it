@@ -24,4 +24,6 @@ dist/
 dist2/
 dist311/
 dist311-onefile/
+installer/
 *.spec
+!FoundIt.spec
