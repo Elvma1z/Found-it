@@ -7,6 +7,7 @@ venv/
 .venv*/
 data/db/*.db
 data/snapshots/*.jpg
+data/faces/*.jpg
 data/calibration/*.npz
 data/room_config.json
 data/room_profiles.json

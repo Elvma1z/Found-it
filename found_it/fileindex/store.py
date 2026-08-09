@@ -3,6 +3,17 @@ from pathlib import Path
 from typing import Optional, List
 from dataclasses import dataclass, field
 
+# Identifies the CLIP model/weights an image embedding was computed with.
+# Embeddings from different models live in incompatible vector spaces (and
+# are often different dimensions), so FileSearchEngine checks this against
+# what's recorded on disk and re-embeds images if it's changed. ViT-B-32 was
+# chosen over the smaller/faster RN50 because RN50's weaker text-image
+# alignment showed a clear "hub" failure mode in practice: one photo's
+# embedding scored anomalously high against many unrelated text queries
+# (e.g. "at the beach", "in a car", "sleeping" all top-matched the same
+# photo), which ViT-B-32's better-separated embedding space avoids.
+CLIP_MODEL_ID = "ViT-B-32:openai"
+
 
 @dataclass
 class FileEmbedding:
@@ -17,6 +28,13 @@ class FileEmbedding:
 
 
 class EmbeddingStore:
+    """Pure in-memory embedding index and CLIP/text-model loader, shared by
+    both the desktop file search engine and the (separate, ephemeral)
+    device/ADB file search - neither of which this class knows about.
+    Persistence to disk is layered on top by FileSearchEngine, not here,
+    so DeviceScanner's throwaway per-connection store stays exactly as
+    disposable as it always was."""
+
     def __init__(self):
         self.embeddings: List[FileEmbedding] = []
         self._clip_model = None
@@ -30,9 +48,9 @@ class EmbeddingStore:
         try:
             import open_clip
             self._clip_model, _, self._clip_processor = open_clip.create_model_and_transforms(
-                "RN50", pretrained="openai"
+                "ViT-B-32", pretrained="openai"
             )
-            self._clip_tokenizer = open_clip.get_tokenizer("RN50")
+            self._clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
             self._clip_model.eval()
             print("[Extractor] CLIP model loaded")
         except ImportError:

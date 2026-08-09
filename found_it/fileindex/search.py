@@ -5,11 +5,33 @@ import threading
 from typing import List, Optional, Callable, Tuple
 from dataclasses import dataclass
 
+import numpy as np
+
 from found_it.fileindex.indexer import FileIndexer, FileEntry
-from found_it.fileindex.store import EmbeddingStore, FileEmbedding
+from found_it.fileindex.store import EmbeddingStore, FileEmbedding, CLIP_MODEL_ID
+from found_it.fileindex.index_db import IndexDatabase
 from found_it.fileindex.extractor import extract_text_preview, get_file_description
-from found_it.fileindex.faces import get_face_encodings, best_face_match_distance, SAME_PERSON_DISTANCE
+from found_it.fileindex.faces import (
+    get_face_encodings, get_faces_with_locations, best_face_match_distance, SAME_PERSON_DISTANCE
+)
+from found_it.fileindex.people import PersonClusterer, save_face_thumbnail
 from found_it.fileindex.phash import get_perceptual_hash, NEAR_DUPLICATE_HASH_DISTANCE
+
+# A fixed absolute CLIP similarity cutoff doesn't generalize: it's dataset-
+# dependent (it drifts with the CLIP model, and even with a person's own
+# photo mix) and empirically, a small personal photo set is often too
+# visually homogeneous for CLIP to give a query a *low* absolute score just
+# because it's implausible - everything about "a person" scores in a similar
+# narrow band. Instead, score each candidate as a z-score relative to that
+# person's *own* score distribution for this specific query: how much better
+# than a typical photo of them this one is. MIN_DESCRIPTION_Z_SCORE is how
+# many standard deviations above their own mean a photo must be to count as
+# "notably matching" rather than just average.
+MIN_DESCRIPTION_Z_SCORE = 1.0
+# Beyond clearing the bar above, also require staying within this fraction
+# of the best match found for that person, so results don't get padded out
+# with photos only weakly related once a much better match exists.
+MIN_RELATIVE_TO_BEST_MATCH = 0.90
 
 
 @dataclass
@@ -24,14 +46,63 @@ class SearchResult:
 
 class FileSearchEngine:
     def __init__(self):
-        self.indexer = FileIndexer()
         self.store = EmbeddingStore()
+        # Persistence (files, faces, people) lives here, not in EmbeddingStore -
+        # that class is also used standalone by DeviceScanner for ephemeral,
+        # per-connection ADB file search, which must never be written to or
+        # mixed with the durable desktop index.
+        self.index_db = IndexDatabase()
+        self._ensure_clip_model_current()
+        self._load_persisted_index()
+        self.indexer = FileIndexer(is_current=self.index_db.file_up_to_date)
+        self.clusterer = PersonClusterer(self.index_db)
         self._indexing = False
         self._cancel_requested = False
         self._progress_cb: Optional[Callable] = None
         self._done_cb: Optional[Callable] = None
         self._hash_cache: dict = {}
         self._phash_cache: dict = {}
+
+    def _ensure_clip_model_current(self):
+        """If the CLIP model has changed since the index was last built
+        (see CLIP_MODEL_ID), every image's stored embedding is now in a
+        different, incompatible vector space - null them out so they're
+        recomputed on the next scan, without touching faces/people, since
+        face detection doesn't depend on the CLIP model at all."""
+        if self.index_db.get_meta("clip_model") != CLIP_MODEL_ID:
+            self.index_db.null_image_embeddings()
+            self.index_db.set_meta("clip_model", CLIP_MODEL_ID)
+
+    def _load_persisted_index(self):
+        """Repopulate the in-memory store (and its numpy similarity search)
+        from disk, so previously indexed files, embeddings, and detected
+        faces survive an app restart instead of requiring a full rescan."""
+        for row in self.index_db.load_all_file_embeddings():
+            self.store.add(FileEmbedding(
+                path=row["path"],
+                name=row["name"],
+                embedding=row["embedding"],
+                file_type=row["file_type"],
+                text_preview=row["text_preview"],
+                size_bytes=row["size_bytes"],
+                modified_time=row["modified_time"],
+                face_encodings=row["face_encodings"],
+            ))
+
+    def _persist(self, file_emb: FileEmbedding) -> int:
+        """Add a file to the in-memory store and to disk, returning the
+        database file id so callers (e.g. face detection) can link related
+        rows, such as faces, to this file."""
+        self.store.add(file_emb)
+        return self.index_db.upsert_file(
+            path=file_emb.path,
+            name=file_emb.name,
+            file_type=file_emb.file_type,
+            text_preview=file_emb.text_preview,
+            size_bytes=file_emb.size_bytes,
+            modified_time=file_emb.modified_time,
+            embedding=file_emb.embedding,
+        )
 
     def start_indexing(self, root_dirs: List[str],
                        progress_callback: Optional[Callable] = None,
@@ -85,12 +156,12 @@ class FileSearchEngine:
 
             embedding = None
             text_preview = ""
-            face_encodings = []
+            faces_found = []
 
             if entry.is_image:
                 embedding = self.store.embed_image(entry.path)
                 text_preview = get_file_description(entry)
-                face_encodings = get_face_encodings(entry.path)
+                faces_found = get_faces_with_locations(entry.path)
             elif entry.is_text or entry.is_code:
                 text_preview = extract_text_preview(entry.path)
                 if text_preview:
@@ -108,15 +179,209 @@ class FileSearchEngine:
                     text_preview=text_preview[:300],
                     size_bytes=entry.size_bytes,
                     modified_time=entry.modified_time,
-                    face_encodings=face_encodings,
+                    face_encodings=[enc for enc, _bbox in faces_found],
                 )
-                self.store.add(file_emb)
+                file_id = self._persist(file_emb)
+                self._process_faces(file_id, entry.path, faces_found)
 
             self.indexer.mark_indexed(entry.path)
 
         self._indexing = False
         if self._done_cb:
             self._done_cb(len(self.store))
+
+    def _process_faces(self, file_id: int, image_path: str, faces_found: list) -> list:
+        """Cluster every face detected in a just-indexed file into a person
+        (existing or new) and persist a cropped thumbnail for the gallery.
+        Clears any faces left over from a previous version of this file
+        first, since a changed file is re-embedded (and re-faced) fresh.
+        Returns the assigned person id for each face, in the same order as
+        faces_found."""
+        if not faces_found:
+            return []
+        self.index_db.delete_faces_for_file(file_id)
+        person_ids = []
+        for encoding, bbox in faces_found:
+            person_id = self.clusterer.assign(encoding)
+            thumbnail_path = save_face_thumbnail(image_path, bbox)
+            self.index_db.add_face(file_id, person_id, encoding, bbox, thumbnail_path)
+            if thumbnail_path is not None:
+                self.index_db.set_person_thumbnail(person_id, thumbnail_path)
+            person_ids.append(person_id)
+        return person_ids
+
+    @staticmethod
+    def _largest_face_index(faces_found: list) -> int:
+        def area(item):
+            _encoding, (top, right, bottom, left) = item
+            return (bottom - top) * (right - left)
+        return max(range(len(faces_found)), key=lambda i: area(faces_found[i]))
+
+    def _index_picked_image(self, image_path: str):
+        """Embed and persist a user-picked image (outside the normal folder
+        scan) and return (file_id, faces_found), so a caller can link one of
+        its faces to a person. None if the image can't be embedded."""
+        embedding = self.store.embed_image(image_path)
+        if embedding is None:
+            return None
+        faces_found = get_faces_with_locations(image_path)
+        size_bytes = os.path.getsize(image_path) if os.path.exists(image_path) else 0
+        file_emb = FileEmbedding(
+            path=image_path,
+            name=os.path.basename(image_path),
+            embedding=embedding,
+            file_type="image",
+            size_bytes=size_bytes,
+            face_encodings=[enc for enc, _bbox in faces_found],
+        )
+        file_id = self._persist(file_emb)
+        return file_id, faces_found
+
+    def add_person_from_image(self, image_path: str, name: str) -> Optional[int]:
+        """Manually seed (or match into) a person from one picked photo, for
+        tagging someone before a folder scan reaches their photos. Uses the
+        largest face in the image. Returns the named person's id, or None
+        if no face was found."""
+        indexed = self._index_picked_image(image_path)
+        if indexed is None:
+            return None
+        file_id, faces_found = indexed
+        if not faces_found:
+            return None
+
+        person_ids = self._process_faces(file_id, image_path, faces_found)
+        idx = self._largest_face_index(faces_found)
+        person_id = person_ids[idx]
+        self.rename_person(person_id, name)
+        return person_id
+
+    def add_file_to_person(self, image_path: str, person_id: int) -> bool:
+        """Manually attach a photo to an existing person, for a face the
+        automatic scan missed or clustered separately (e.g. an unusual
+        angle or lighting) - bypasses the usual same-person distance check
+        since the user is confirming the match directly."""
+        indexed = self._index_picked_image(image_path)
+        if indexed is None:
+            return False
+        file_id, faces_found = indexed
+        if not faces_found:
+            return False
+
+        self.index_db.delete_faces_for_file(file_id)
+        idx = self._largest_face_index(faces_found)
+        encoding, bbox = faces_found[idx]
+        self.clusterer.force_assign(encoding, person_id)
+        thumbnail_path = save_face_thumbnail(image_path, bbox)
+        self.index_db.add_face(file_id, person_id, encoding, bbox, thumbnail_path)
+        if thumbnail_path is not None:
+            self.index_db.set_person_thumbnail(person_id, thumbnail_path)
+        return True
+
+    def get_people(self) -> list:
+        """Every detected person with at least one face, most-photographed
+        first, as dicts with id/name/thumbnail_path/face_count."""
+        return self.index_db.get_people()
+
+    def rename_person(self, person_id: int, name: str):
+        self.index_db.rename_person(person_id, name)
+
+    def delete_person(self, person_id: int):
+        """Remove a person and their face records entirely - e.g. a
+        mis-clustered "person" that isn't really a distinct individual, or
+        one the user just doesn't want tracked. The underlying photos stay
+        indexed and searchable; they just won't show up under this identity
+        anymore, and could form a new person if rescanned later."""
+        thumbnails = set(self.index_db.get_face_thumbnails_for_person(person_id))
+        person = next((p for p in self.get_people() if p["id"] == person_id), None)
+        if person and person.get("thumbnail_path"):
+            thumbnails.add(person["thumbnail_path"])
+
+        self.index_db.delete_person(person_id)
+        self.clusterer.forget(person_id)
+
+        for path in thumbnails:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def search_person_by_description(self, query: str, top_k: int = 20):
+        """Given a query naming a known person plus a free-text description
+        of what they're wearing/doing - e.g. "Riddeck wearing a blue
+        jacket" - resolve which person is meant, restrict candidates to
+        their own linked photos (not just whatever else CLIP thinks is
+        relevant across the whole index), and rank just those by how well
+        the description alone matches, with the name itself stripped out
+        first since it's a meaningless token to CLIP and would only dilute
+        the match. Returns (person_id, person_name, results), or None if no
+        known person's name appears in the query."""
+        query_lower = query.strip().lower()
+        match = None
+        for name, _centroid in self.index_db.get_named_people():
+            found = re.search(rf"\b{re.escape(name.lower())}\b", query_lower)
+            # Prefer the longest matching name, in case one name is a
+            # substring of another (e.g. "Alex" inside "Alexander").
+            if found and (match is None or len(name) > len(match[0])):
+                match = (name, found)
+        if match is None:
+            return None
+
+        name, found = match
+        person_id = self.index_db.get_person_id_by_name(name)
+        if person_id is None:
+            return None
+
+        description = (query[:found.start()] + query[found.end():]).strip(" ,.!?'\"")
+        if not description:
+            return person_id, name, self.get_files_for_person(person_id)[:top_k]
+
+        query_embedding = self.store.embed_query(description)
+        if query_embedding is None:
+            return person_id, name, self.get_files_for_person(person_id)[:top_k]
+
+        person_paths = {row["path"] for row in self.index_db.get_files_for_person(person_id)}
+        candidates = [e for e in self.store.embeddings if e.path in person_paths]
+        if not candidates:
+            return person_id, name, []
+
+        raw_scores = np.array([float(e.embedding @ query_embedding) for e in candidates])
+        mean, std = float(raw_scores.mean()), float(raw_scores.std())
+        top_score = float(raw_scores.max())
+
+        # Drop anything that isn't a real match for the description: not
+        # notably better than a typical photo of this person for this query
+        # (z-score against their own distribution, not a fixed number - see
+        # MIN_DESCRIPTION_Z_SCORE), or too far behind the single best match
+        # found among their photos.
+        kept = []
+        for e, score in zip(candidates, raw_scores):
+            z = (score - mean) / std if std > 1e-6 else 0.0
+            if z >= MIN_DESCRIPTION_Z_SCORE and (top_score <= 0 or score >= top_score * MIN_RELATIVE_TO_BEST_MATCH):
+                kept.append((e, float(score)))
+        kept.sort(key=lambda pair: pair[1], reverse=True)
+
+        results = [
+            SearchResult(
+                path=e.path, name=e.name, score=score, file_type=e.file_type,
+                text_preview=e.text_preview, size_bytes=e.size_bytes,
+            )
+            for e, score in kept[:top_k]
+        ]
+        return person_id, name, results
+
+    def get_files_for_person(self, person_id: int) -> List[SearchResult]:
+        rows = self.index_db.get_files_for_person(person_id)
+        return [
+            SearchResult(
+                path=row["path"],
+                name=row["name"],
+                score=1.0,
+                file_type=row["file_type"] or "image",
+                text_preview=row["text_preview"] or "",
+                size_bytes=row["size_bytes"] or 0,
+            )
+            for row in rows
+        ]
 
     def add_named_image(self, path: str, name: str,
                         done_callback: Optional[Callable] = None):
@@ -129,7 +394,7 @@ class FileSearchEngine:
             embedding = self.store.embed_image(path)
             if embedding is not None:
                 size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
-                self.store.add(FileEmbedding(
+                self._persist(FileEmbedding(
                     path=path,
                     name=name,
                     embedding=embedding,
@@ -144,10 +409,17 @@ class FileSearchEngine:
         threading.Thread(target=worker, daemon=True).start()
 
     def _find_referenced_person(self, query_lower: str) -> Optional[Tuple[str, list]]:
-        """If the query mentions, as a whole word/phrase, the name of an image
-        the user tagged that has a detected face in it, return that name and
-        every reference face encoding filed under it (a person can have more
-        than one named photo)."""
+        """If the query mentions, as a whole word/phrase, the name of a
+        person from the People gallery, return that name and their cluster
+        centroid as the reference encoding - built from every one of their
+        detected photos, not just a single tagged one. Falls back to the
+        older per-image tagging ("+ Add Image") for named files that aren't
+        faces at all, e.g. "Passport"."""
+        for name, centroid in self.index_db.get_named_people():
+            name_lower = name.lower()
+            if re.search(rf"\b{re.escape(name_lower)}\b", query_lower):
+                return name_lower, [centroid]
+
         by_name: dict = {}
         for e in self.store.embeddings:
             if e.file_type == "image" and e.face_encodings:

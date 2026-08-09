@@ -6,8 +6,10 @@ DATA_DIR = BASE_DIR / "data"
 DB_DIR = DATA_DIR / "db"
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
 CALIBRATION_DIR = DATA_DIR / "calibration"
+FACES_DIR = DATA_DIR / "faces"
 
 DB_PATH = DB_DIR / "found_it.db"
+INDEX_DB_PATH = DB_DIR / "file_index.db"
 
 CAMERA_RESOLUTION = (640, 480)
 CAMERA_FPS = 15

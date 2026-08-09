@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from found_it.config import DATA_DIR
 
 
-INDEX_DB = DATA_DIR / "file_index.db"
-
 # This app's own project root (source, venvs, and PyInstaller build/dist
 # output). Never worth indexing as "the user's files" - if it happens to sit
 # under a folder the user picks (e.g. a Documents\GitHub checkout), its
@@ -60,13 +58,18 @@ SKIP_DIR_PREFIXES = ("dist", "build")
 
 
 class FileIndexer:
-    def __init__(self):
+    def __init__(self, is_current: Optional[Callable[[str, int, float], bool]] = None):
+        """is_current(path, size_bytes, modified_time), if given, lets the
+        walk skip re-embedding/re-facing files whose already-indexed record
+        still matches - so rescanning "entire PC" is fast after the first
+        pass instead of redoing every file's CLIP/face work every launch."""
         self.entries: List[FileEntry] = []
         self._lock = threading.Lock()
         self._scanning = False
         self._cancel_requested = False
         self._progress_callback: Optional[Callable] = None
         self._done_callback: Optional[Callable] = None
+        self._is_current = is_current
 
     def start_scan(self, root_dirs: List[str],
                    progress_callback: Optional[Callable] = None,
@@ -133,8 +136,9 @@ class FileIndexer:
 
                     try:
                         stat = filepath.stat()
+                        resolved_path = str(filepath.resolve())
                         entry = FileEntry(
-                            path=str(filepath.resolve()),
+                            path=resolved_path,
                             name=filename,
                             extension=ext,
                             size_bytes=stat.st_size,
@@ -143,6 +147,10 @@ class FileIndexer:
                             is_text=is_text,
                             is_code=is_code,
                         )
+                        if self._is_current and self._is_current(
+                            resolved_path, stat.st_size, stat.st_mtime
+                        ):
+                            entry.indexed = True
                         new_entries.append(entry)
                         count += 1
 

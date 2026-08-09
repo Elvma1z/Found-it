@@ -138,4 +138,20 @@ def widget_qss(p: dict) -> str:
             max-height: 20px;
         }}
         QProgressBar::chunk {{ background-color: {p['accent']}; border-radius: 3px; }}
+        QTabWidget::pane {{
+            background-color: {p['bg']}; border: 1px solid {p['border']};
+            border-radius: 4px; top: -1px;
+        }}
+        QTabBar::tab {{
+            background-color: {p['panel']}; color: {p['text_dim']};
+            border: 1px solid {p['border']}; border-bottom: none;
+            border-top-left-radius: 4px; border-top-right-radius: 4px;
+            padding: 6px 16px; margin-right: 2px;
+        }}
+        QTabBar::tab:selected {{
+            background-color: {p['bg']}; color: {p['text']};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background-color: {p['hover']}; color: {p['text']};
+        }}
     """
