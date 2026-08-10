@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QMainWindow, QDockWidget, QScrollArea, QTabWidget, QComboBox,
     QGraphicsScene, QGraphicsView
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject, QEvent
 from PyQt5.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter, QColor
 
 from found_it.config import DATA_DIR, DB_PATH, SNAPSHOTS_DIR
@@ -23,6 +23,24 @@ from found_it.device.adb_handler import ADBHandler
 from found_it.gui.splash import create_notice_splash
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.room_map import RoomMap
+from found_it.gui.room_setup_panel import RoomSetupPanel
+from found_it.gui.file_search_panel import FileSearchPanel
+from found_it.gui.device_search_panel import DeviceSearchPanel
+
+
+class _InertFilter(QObject):
+    """Swallows input on a widget tree so a real panel can be embedded in the
+    Panel Customization preview purely for looks - clicking "Scan Room with
+    Cameras" or deleting a room profile in there would silently mutate the
+    user's real data, which a "preview" has no business doing."""
+
+    _BLOCKED = (
+        QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick,
+        QEvent.KeyPress, QEvent.KeyRelease, QEvent.Wheel, QEvent.ContextMenu,
+    )
+
+    def eventFilter(self, obj, event):
+        return event.type() in self._BLOCKED
 
 
 NAV_TAB_KEYS_DEFAULT = ["room", "room_setup", "file", "device"]
@@ -189,8 +207,15 @@ class SettingsPanel(QWidget):
         self.preview_room_map.apply_theme(p)
 
         if hasattr(self, "preview_screens"):
+            real_panels = set(getattr(self, "_preview_real_panels", []))
             for key, screen in self.preview_screens.items():
-                if key != "room":
+                if key == "room":
+                    continue
+                if screen in real_panels:
+                    # Real panels theme themselves fully (widget_qss + repolish) -
+                    # overwriting their stylesheet here would blank that out.
+                    screen.apply_theme(p)
+                else:
                     screen.setStyleSheet(f"background-color: {p['bg']};")
 
         if hasattr(self, "preview_view"):
@@ -1021,18 +1046,20 @@ class SettingsPanel(QWidget):
         self.preview_window.setCentralWidget(center_panel)
 
         # ================= other tabs' screens, shown when their tab is clicked =================
-        self.preview_screens = {
-            "room": self.preview_window,
-            "room_setup": self._build_preview_placeholder_screen(
-                "Room Setup", "Add rooms, position cameras, and draw zones on the floor plan."
-            ),
-            "file": self._build_preview_placeholder_screen(
-                "Search", "Search and People tabs for finding files and faces across your index."
-            ),
-            "device": self._build_preview_placeholder_screen(
-                "Other Devices", "Scan and browse files on phones connected over ADB."
-            ),
-        }
+        # The real panels, so these look pixel-identical to the default app -
+        # but made inert (see _InertFilter) since they're editors/scanners
+        # with real side effects (deleting a room, renaming a face, writing
+        # to the file index), not passive displays like Room Tracker's docks.
+        self.preview_screens = {"room": self.preview_window}
+        self.preview_screens["room_setup"] = self._build_preview_real_screen(
+            RoomSetupPanel, "Room Setup", "Add rooms, position cameras, and draw zones on the floor plan."
+        )
+        self.preview_screens["file"] = self._build_preview_real_screen(
+            FileSearchPanel, "Search", "Search and People tabs for finding files and faces across your index."
+        )
+        self.preview_screens["device"] = self._build_preview_real_screen(
+            DeviceSearchPanel, "Other Devices", "Scan and browse files on phones connected over ADB."
+        )
 
         self.preview_stack = QStackedWidget()
         for screen in self.preview_screens.values():
@@ -1107,10 +1134,31 @@ class SettingsPanel(QWidget):
         save_project_btn.clicked.connect(self._on_save_project)
         layout.addWidget(save_project_btn)
 
+    def _build_preview_real_screen(self, panel_cls, title: str, desc: str) -> QWidget:
+        """Instantiates the mode's actual panel class so the preview looks
+        pixel-identical to the default app, made input-inert with
+        _InertFilter, and its own apply_theme() re-run whenever the preview's
+        theme changes. Falls back to a plain title/description placeholder
+        if the real panel fails to construct (e.g. no ADB / camera hardware
+        on this machine) so a Settings page can't be broken by it."""
+        try:
+            panel = panel_cls()
+        except Exception:
+            return self._build_preview_placeholder_screen(title, desc)
+
+        guard = _InertFilter(panel)
+        panel._preview_inert_guard = guard
+        for w in [panel] + panel.findChildren(QWidget):
+            w.installEventFilter(guard)
+
+        if not hasattr(self, "_preview_real_panels"):
+            self._preview_real_panels = []
+        self._preview_real_panels.append(panel)
+        return panel
+
     def _build_preview_placeholder_screen(self, title: str, desc: str) -> QWidget:
         """A lightweight stand-in for a mode's real panel - same title/description
-        chrome, but without spinning up its heavy real widget (e.g. File Search
-        loads a CLIP model) a second time just for this preview."""
+        chrome, used only if that panel's real widget fails to construct."""
         screen = QWidget()
         screen_layout = QVBoxLayout(screen)
         screen_layout.setContentsMargins(16, 12, 16, 12)
