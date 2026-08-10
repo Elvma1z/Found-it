@@ -60,11 +60,8 @@ DOCK_PANEL_LABELS = {
 PREVIEW_WIDTH = 1350
 PREVIEW_HEIGHT = 600
 PREVIEW_SCALE = 0.62
-
-ALL_PANELS = [
-    "Room Tracker", "Room Setup", "File Search", "Other Devices",
-    "Cameras", "Found Items", "Room Map",
-]
+SIDEBAR_WIDTH = 320
+SIDEBAR_THUMBNAIL_WIDTH = 280
 
 
 class SettingsPanel(QWidget):
@@ -118,7 +115,8 @@ class SettingsPanel(QWidget):
         family = self.app_settings.font_family
         self.preview_app_title.setFont(QFont(family, 14, QFont.Bold))
         self.preview_map_title.setFont(QFont(family, 12, QFont.Bold))
-        self.sidebar_title.setFont(QFont(family, 11, QFont.Bold))
+        for header in getattr(self, "_sidebar_category_headers", {}).values():
+            header.setFont(QFont(family, 11, QFont.Bold))
 
         self.preview_navbar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
         self.preview_app_title.setStyleSheet(f"color: {p['accent']};")
@@ -232,12 +230,15 @@ class SettingsPanel(QWidget):
             self.preview_sidebar.setStyleSheet(f"""
                 QFrame {{ background-color: {p['panel']}; border: 1px solid {p['border']}; border-radius: 6px; }}
             """)
-            self.sidebar_panels_list.setStyleSheet(f"""
-                QListWidget {{ background: transparent; border: none; }}
-                QListWidget::item {{
-                    color: {p['text_dim']}; padding: 5px 4px; border-bottom: 1px solid {p['border']};
-                }}
-            """)
+            self.sidebar_scroll.setStyleSheet("background: transparent; border: none;")
+            self.sidebar_scroll.viewport().setStyleSheet("background: transparent;")
+            for header in self._sidebar_category_headers.values():
+                header.setStyleSheet(f"color: {p['text']};")
+            for sep in self._sidebar_category_seps:
+                sep.setStyleSheet(f"background-color: {p['border']};")
+
+        for blank in getattr(self, "_preview_blank_widgets", []):
+            blank.setStyleSheet(f"background-color: {p['bg']};")
 
     def _setup_ui(self):
         outer = QVBoxLayout(self)
@@ -885,6 +886,11 @@ class SettingsPanel(QWidget):
     # ---------------- Panel Customization subsection ----------------
 
     def _build_panel_customization_section(self, layout: QVBoxLayout):
+        self._sidebar_category_headers = {}
+        self._sidebar_category_seps = []
+        self._preview_blank_widgets = []
+        self._panels_cleared = False
+
         pc_title = QLabel("Panel Customization")
         pc_title.setFont(QFont("Segoe UI", 13, QFont.Bold))
         pc_title.setProperty("cls", "title")
@@ -1091,33 +1097,27 @@ class SettingsPanel(QWidget):
         self.preview_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview_view.scale(PREVIEW_SCALE, PREVIEW_SCALE)
 
-        # ================= sidebar: every panel the app comes with =================
+        # ================= sidebar: empty until "Clear Panels" fills it =================
+        # Cleared panels land here as the real (scaled-down) widgets - not
+        # text - grouped under a header for whichever tab they came from.
         sidebar = QFrame()
-        sidebar.setFixedSize(200, scaled_h)
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(10, 10, 10, 10)
-        sidebar_layout.setSpacing(6)
+        sidebar.setFixedSize(SIDEBAR_WIDTH, scaled_h)
+        sidebar_outer = QVBoxLayout(sidebar)
+        sidebar_outer.setContentsMargins(0, 0, 0, 0)
+        sidebar_outer.setSpacing(0)
 
-        self.sidebar_title = QLabel("Panels")
-        self.sidebar_title.setProperty("cls", "title")
-        sidebar_layout.addWidget(self.sidebar_title)
+        self.sidebar_scroll = QScrollArea()
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        sidebar_hint = QLabel("Everything the app comes with.")
-        sidebar_hint.setProperty("cls", "hint")
-        sidebar_hint.setWordWrap(True)
-        sidebar_layout.addWidget(sidebar_hint)
-
-        self.sidebar_panels_list = QListWidget()
-        self.sidebar_panels_list.setFrameShape(QFrame.NoFrame)
-        # Reference-only legend, not an interactive control - without this,
-        # it can pick up keyboard focus on window activation and Qt will
-        # default an arbitrary row to "current", highlighting it via the
-        # shared ::item:selected rule as if the user had clicked it.
-        self.sidebar_panels_list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.sidebar_panels_list.setFocusPolicy(Qt.NoFocus)
-        for name in ALL_PANELS:
-            self.sidebar_panels_list.addItem(QListWidgetItem(name))
-        sidebar_layout.addWidget(self.sidebar_panels_list, 1)
+        sidebar_content = QWidget()
+        self.sidebar_content_layout = QVBoxLayout(sidebar_content)
+        self.sidebar_content_layout.setContentsMargins(10, 10, 10, 10)
+        self.sidebar_content_layout.setSpacing(10)
+        self.sidebar_content_layout.addStretch()
+        self.sidebar_scroll.setWidget(sidebar_content)
+        sidebar_outer.addWidget(self.sidebar_scroll)
 
         preview_row = QHBoxLayout()
         preview_row.setSpacing(12)
@@ -1133,10 +1133,17 @@ class SettingsPanel(QWidget):
         self.panel_customization_status_label.setProperty("cls", "status")
         layout.addWidget(self.panel_customization_status_label)
 
+        buttons_row = QHBoxLayout()
         save_project_btn = QPushButton("Save Project")
         save_project_btn.setProperty("cls", "primary")
         save_project_btn.clicked.connect(self._on_save_project)
-        layout.addWidget(save_project_btn)
+        buttons_row.addWidget(save_project_btn, 1)
+
+        clear_panels_btn = QPushButton("Clear Panels")
+        clear_panels_btn.setProperty("cls", "secondary")
+        clear_panels_btn.clicked.connect(self._on_clear_panels)
+        buttons_row.addWidget(clear_panels_btn)
+        layout.addLayout(buttons_row)
 
     def _build_preview_real_screen(self, panel_cls, title: str, desc: str) -> QWidget:
         """Instantiates the mode's actual panel class so the preview looks
@@ -1245,13 +1252,17 @@ class SettingsPanel(QWidget):
         # up avoids that race.
         self._panel_customization_loading = True
 
-        order = self._get_dock_panel_order()
-        areas = [Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea]
-        docks = {"camera_dock": self.preview_camera_dock, "found_items_dock": self.preview_found_dock}
-        for area, key in zip(areas, order):
-            dock = docks.get(key)
-            if dock is not None:
-                self.preview_window.addDockWidget(area, dock)
+        # Once cleared, the docks live as thumbnails in the sidebar - re-adding
+        # them here (e.g. because the user left and re-opened Customization)
+        # would yank them straight back out of those thumbnails.
+        if not getattr(self, "_panels_cleared", False):
+            order = self._get_dock_panel_order()
+            areas = [Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea]
+            docks = {"camera_dock": self.preview_camera_dock, "found_items_dock": self.preview_found_dock}
+            for area, key in zip(areas, order):
+                dock = docks.get(key)
+                if dock is not None:
+                    self.preview_window.addDockWidget(area, dock)
 
         self._panel_customization_dirty = False
         if hasattr(self, "panel_customization_status_label"):
@@ -1275,6 +1286,108 @@ class SettingsPanel(QWidget):
         if area == Qt.RightDockWidgetArea:
             return ["found_items_dock", "camera_dock"]
         return ["camera_dock", "found_items_dock"]
+
+    def _wrap_as_thumbnail(self, widget: QWidget, size: QSize = None,
+                            target_width: int = SIDEBAR_THUMBNAIL_WIDTH) -> QGraphicsView:
+        """Shrinks a real widget to sidebar width the same way the main
+        preview is scaled down, so a cleared panel (even a whole real one
+        like Room Setup) still reads as itself instead of an unusable sliver."""
+        if size is None or size.width() <= 0 or size.height() <= 0:
+            size = widget.size()
+        if size.width() <= 0 or size.height() <= 0:
+            size = widget.sizeHint()
+        width = max(size.width(), 1)
+        height = max(size.height(), 1)
+        scale = target_width / width
+        target_height = max(round(height * scale), 30)
+
+        scene = QGraphicsScene(self)
+        scene.addWidget(widget)
+        scene.setSceneRect(0, 0, width, height)
+
+        view = QGraphicsView(scene)
+        view.setFixedSize(target_width, target_height)
+        view.setFrameShape(QFrame.NoFrame)
+        view.setRenderHint(QPainter.SmoothPixmapTransform)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        view.scale(scale, scale)
+        view.setStyleSheet(f"border: 1px solid {self.palette['border']}; border-radius: 4px;")
+        return view
+
+    def _blank_panel(self) -> QWidget:
+        blank = QWidget()
+        blank.setStyleSheet(f"background-color: {self.palette['bg']};")
+        self._preview_blank_widgets.append(blank)
+        return blank
+
+    def _add_to_sidebar_category(self, category: str, items: list):
+        """items: list of (widget, size) - size captured before the widget
+        was detached from its old layout, since a hidden/reparented widget
+        can no longer be trusted to report its own size."""
+        insert_at = self.sidebar_content_layout.count() - 1  # keep the trailing stretch last
+
+        if category not in self._sidebar_category_headers:
+            if self._sidebar_category_headers:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.HLine)
+                sep.setStyleSheet(f"background-color: {self.palette['border']};")
+                self._sidebar_category_seps.append(sep)
+                self.sidebar_content_layout.insertWidget(insert_at, sep)
+                insert_at += 1
+
+            header = QLabel(category)
+            header.setFont(QFont(self.app_settings.font_family, 11, QFont.Bold))
+            header.setStyleSheet(f"color: {self.palette['text']};")
+            self._sidebar_category_headers[category] = header
+            self.sidebar_content_layout.insertWidget(insert_at, header)
+            insert_at += 1
+
+        for widget, size in items:
+            thumb = self._wrap_as_thumbnail(widget, size=size)
+            self.sidebar_content_layout.insertWidget(insert_at, thumb)
+            insert_at += 1
+
+    def _on_clear_panels(self):
+        if self._panels_cleared:
+            return
+        self._panels_cleared = True
+
+        # --- Room Tracker: its 3 real panels, individually ---
+        cam_size = self.preview_camera_dock.size()
+        found_size = self.preview_found_dock.size()
+        center = self.preview_window.centralWidget()
+        center_size = center.size()
+
+        self.preview_window.removeDockWidget(self.preview_camera_dock)
+        self.preview_window.removeDockWidget(self.preview_found_dock)
+        self.preview_window.setCentralWidget(self._blank_panel())
+
+        self._add_to_sidebar_category("Room Tracker", [
+            (self.preview_camera_dock, cam_size),
+            (self.preview_found_dock, found_size),
+            (center, center_size),
+        ])
+
+        # --- the other tabs: one whole panel each ---
+        for key in ("room_setup", "file", "device"):
+            screen = self.preview_screens.get(key)
+            if screen is None:
+                continue
+            screen_size = screen.size()
+            idx = self.preview_stack.indexOf(screen)
+            self.preview_stack.insertWidget(idx, self._blank_panel())
+            self.preview_stack.removeWidget(screen)
+            self.preview_screens[key] = self.preview_stack.widget(idx)
+            self._add_to_sidebar_category(NAV_TAB_LABELS[key], [(screen, screen_size)])
+
+        self.preview_stack.setCurrentWidget(self.preview_screens["room"])
+        if self.hero_list.count():
+            self.hero_list.setCurrentRow(0)
+
+        self.panel_customization_status_label.setText(
+            "Panels moved to the sidebar, grouped by tab — the real app is untouched either way."
+        )
 
     def _on_save_project(self):
         hero_order = [self.hero_list.item(i).data(Qt.UserRole) for i in range(self.hero_list.count())]
