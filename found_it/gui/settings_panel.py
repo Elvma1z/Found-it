@@ -110,8 +110,15 @@ class SettingsPanel(QWidget):
     def _apply_preview_theme(self, p: dict):
         """Styles the Panel Customization preview to match main_window's
         _apply_theme() pixel-for-pixel, so it looks exactly like the real
-        app's nav bar and Room Tracker instead of an approximation."""
+        app's nav bar and Room Tracker instead of an approximation - and
+        picks up the current theme/font every time this runs, since both
+        are saved (and this gets re-invoked) together from Appearance."""
         self.preview_frame.setStyleSheet(f"border: 1px solid {p['border']};")
+
+        family = self.app_settings.font_family
+        self.preview_app_title.setFont(QFont(family, 14, QFont.Bold))
+        self.preview_map_title.setFont(QFont(family, 12, QFont.Bold))
+        self.sidebar_title.setFont(QFont(family, 11, QFont.Bold))
 
         self.preview_navbar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
         self.preview_app_title.setStyleSheet(f"color: {p['accent']};")
@@ -909,7 +916,6 @@ class SettingsPanel(QWidget):
         nav_row.setSpacing(0)
 
         self.preview_app_title = QLabel("Found It")
-        self.preview_app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
         nav_row.addWidget(self.preview_app_title)
 
         nav_row.addSpacing(24)
@@ -1019,7 +1025,6 @@ class SettingsPanel(QWidget):
 
         map_header = QHBoxLayout()
         self.preview_map_title = QLabel("Room Map")
-        self.preview_map_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
         map_header.addWidget(self.preview_map_title)
 
         self.preview_room_selector = QComboBox()
@@ -1093,10 +1098,9 @@ class SettingsPanel(QWidget):
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
         sidebar_layout.setSpacing(6)
 
-        sidebar_title = QLabel("Panels")
-        sidebar_title.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        sidebar_title.setProperty("cls", "title")
-        sidebar_layout.addWidget(sidebar_title)
+        self.sidebar_title = QLabel("Panels")
+        self.sidebar_title.setProperty("cls", "title")
+        sidebar_layout.addWidget(self.sidebar_title)
 
         sidebar_hint = QLabel("Everything the app comes with.")
         sidebar_hint.setProperty("cls", "hint")
@@ -1165,7 +1169,7 @@ class SettingsPanel(QWidget):
         screen_layout.setSpacing(8)
 
         title_label = QLabel(title)
-        title_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        title_label.setFont(QFont(self.app_settings.font_family, 16, QFont.Bold))
         title_label.setProperty("cls", "title")
         screen_layout.addWidget(title_label)
 
