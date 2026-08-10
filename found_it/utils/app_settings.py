@@ -23,6 +23,8 @@ def load_app_settings() -> AppSettings:
             theme=data.get("theme", defaults.theme),
             title_hotkey_action=data.get("title_hotkey_action", defaults.title_hotkey_action),
             title_hotkey_label=data.get("title_hotkey_label", defaults.title_hotkey_label),
+            nav_tab_order=data.get("nav_tab_order", defaults.nav_tab_order),
+            dock_panel_order=data.get("dock_panel_order", defaults.dock_panel_order),
         )
     return AppSettings()
 
@@ -40,6 +42,8 @@ def save_app_settings(settings: AppSettings):
         "theme": settings.theme,
         "title_hotkey_action": settings.title_hotkey_action,
         "title_hotkey_label": settings.title_hotkey_label,
+        "nav_tab_order": settings.nav_tab_order,
+        "dock_panel_order": settings.dock_panel_order,
     }
     with open(SETTINGS_FILE, "w") as f:
         json.dump(data, f, indent=2)

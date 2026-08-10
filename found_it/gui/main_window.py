@@ -1,3 +1,5 @@
+import json
+
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QCheckBox, QTabWidget,
@@ -5,6 +7,9 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, QByteArray, QEvent, pyqtSignal
 from PyQt5.QtGui import QFont
+
+NAV_TAB_KEYS_DEFAULT = ["room", "room_setup", "file", "device"]
+DOCK_PANEL_KEYS_DEFAULT = ["camera_dock", "found_items_dock"]
 
 
 class ClickableLabel(QLabel):
@@ -125,6 +130,7 @@ class MainWindow(QMainWindow):
         self.nav_bar.setFixedHeight(48)
         nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(12, 0, 0, 0)
+        self.nav_layout = nav_layout
 
         self.app_title = ClickableLabel("Found It")
         self.app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
@@ -137,22 +143,27 @@ class MainWindow(QMainWindow):
         self.mode_room_btn.setCheckable(True)
         self.mode_room_btn.setChecked(True)
         self.mode_room_btn.clicked.connect(lambda: self._switch_mode("room"))
-        nav_layout.addWidget(self.mode_room_btn)
 
         self.mode_room_setup_btn = QPushButton("Room Setup")
         self.mode_room_setup_btn.setCheckable(True)
         self.mode_room_setup_btn.clicked.connect(lambda: self._switch_mode("room_setup"))
-        nav_layout.addWidget(self.mode_room_setup_btn)
 
         self.mode_file_btn = QPushButton("File Search")
         self.mode_file_btn.setCheckable(True)
         self.mode_file_btn.clicked.connect(lambda: self._switch_mode("file"))
-        nav_layout.addWidget(self.mode_file_btn)
 
         self.mode_device_btn = QPushButton("Other Devices")
         self.mode_device_btn.setCheckable(True)
         self.mode_device_btn.clicked.connect(lambda: self._switch_mode("device"))
-        nav_layout.addWidget(self.mode_device_btn)
+
+        self.nav_mode_buttons = {
+            "room": self.mode_room_btn,
+            "room_setup": self.mode_room_setup_btn,
+            "file": self.mode_file_btn,
+            "device": self.mode_device_btn,
+        }
+        self._nav_tabs_insert_index = nav_layout.count()
+        self._apply_nav_tab_order()
 
         nav_layout.addStretch()
 
@@ -406,9 +417,52 @@ class MainWindow(QMainWindow):
 
         tracker.setCentralWidget(center_panel)
 
+        self.room_widget = tracker
+        self._apply_dock_panel_order()
+
         self._restore_room_tracker_layout(tracker)
 
         return tracker
+
+    def _get_nav_tab_order(self) -> list:
+        raw = self.app_settings.nav_tab_order
+        if raw:
+            try:
+                order = json.loads(raw)
+                if sorted(order) == sorted(NAV_TAB_KEYS_DEFAULT):
+                    return order
+            except (ValueError, TypeError):
+                pass
+        return list(NAV_TAB_KEYS_DEFAULT)
+
+    def _apply_nav_tab_order(self):
+        order = self._get_nav_tab_order()
+        for btn in self.nav_mode_buttons.values():
+            self.nav_layout.removeWidget(btn)
+        for i, key in enumerate(order):
+            btn = self.nav_mode_buttons.get(key)
+            if btn is not None:
+                self.nav_layout.insertWidget(self._nav_tabs_insert_index + i, btn)
+
+    def _get_dock_panel_order(self) -> list:
+        raw = self.app_settings.dock_panel_order
+        if raw:
+            try:
+                order = json.loads(raw)
+                if sorted(order) == sorted(DOCK_PANEL_KEYS_DEFAULT):
+                    return order
+            except (ValueError, TypeError):
+                pass
+        return list(DOCK_PANEL_KEYS_DEFAULT)
+
+    def _apply_dock_panel_order(self):
+        order = self._get_dock_panel_order()
+        docks = {"camera_dock": self.camera_dock, "found_items_dock": self.found_items_dock}
+        areas = [Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea]
+        for area, key in zip(areas, order):
+            dock = docks.get(key)
+            if dock is not None:
+                self.room_widget.addDockWidget(area, dock)
 
     def _toggle_maximize(self):
         if self.isMaximized():
@@ -616,6 +670,8 @@ class MainWindow(QMainWindow):
         self.palette = get_palette(self.app_settings.theme)
         self._apply_theme()
         self.dewarp_check.setChecked(self.app_settings.dewarp_default)
+        self._apply_nav_tab_order()
+        self._apply_dock_panel_order()
         self._start_all_room_cameras()
 
     def _on_connect_saved_device(self, serial: str):

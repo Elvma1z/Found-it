@@ -62,3 +62,5 @@ class AppSettings:
     theme: str = "Indigo"
     title_hotkey_action: str = "none"
     title_hotkey_label: str = ""
+    nav_tab_order: str = ""
+    dock_panel_order: str = ""
