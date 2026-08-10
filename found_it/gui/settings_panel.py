@@ -26,6 +26,7 @@ class SettingsPanel(QWidget):
     settings_updated = pyqtSignal()
     connect_device_requested = pyqtSignal(str)
     rooms_imported = pyqtSignal()
+    find_shortcut_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -74,6 +75,7 @@ class SettingsPanel(QWidget):
         self.nav_list.addItem(QListWidgetItem("Appearance"))
         self.nav_list.addItem(QListWidgetItem("Data & Security"))
         self.nav_list.addItem(QListWidgetItem("Saved Devices"))
+        self.nav_list.addItem(QListWidgetItem("Customization"))
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
         body.addWidget(self.nav_list)
 
@@ -87,6 +89,7 @@ class SettingsPanel(QWidget):
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_data_page())
         self.pages.addWidget(self._build_devices_page())
+        self.pages.addWidget(self._build_customization_page())
         body.addWidget(self.pages, 1)
 
         outer.addLayout(body, 1)
@@ -113,6 +116,8 @@ class SettingsPanel(QWidget):
         elif row == 3:
             self._refresh_detected_devices()
             self._refresh_saved_list()
+        elif row == 4:
+            self._refresh_customization_status()
 
     # ---------------- Camera page ----------------
 
@@ -618,3 +623,65 @@ class SettingsPanel(QWidget):
         save_saved_devices(self.saved_devices)
         self._refresh_saved_list()
         self.devices_status_label.setText(f"Removed \"{removed['nickname']}\".")
+
+    # ---------------- Customization page ----------------
+
+    def _build_customization_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 4, 16, 4)
+        layout.setSpacing(8)
+
+        layout.addWidget(self._page_title("Customization"))
+        desc = QLabel(
+            "Turn the \"Found It\" title in the nav bar into a shortcut for the "
+            "button you use most."
+        )
+        desc.setProperty("cls", "muted")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        self.current_shortcut_label = self._label("")
+        layout.addWidget(self.current_shortcut_label)
+
+        find_row = QHBoxLayout()
+        find_shortcut_btn = QPushButton("Find Shortcut")
+        find_shortcut_btn.setProperty("cls", "primary")
+        find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
+        find_row.addWidget(find_shortcut_btn)
+
+        clear_shortcut_btn = QPushButton("Clear Shortcut")
+        clear_shortcut_btn.setProperty("cls", "secondary")
+        clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
+        find_row.addWidget(clear_shortcut_btn)
+        find_row.addStretch()
+        layout.addLayout(find_row)
+
+        find_hint = QLabel(
+            "This takes you back to the app. Double-click any button there to bind it. "
+            "Clicking the tabs across the top still switches tabs as normal — it won't "
+            "be picked up as the shortcut."
+        )
+        find_hint.setProperty("cls", "hint")
+        find_hint.setWordWrap(True)
+        layout.addWidget(find_hint)
+
+        layout.addStretch()
+
+        return page
+
+    def _refresh_customization_status(self):
+        self.app_settings = load_app_settings()
+        action = self.app_settings.title_hotkey_action
+        if action.startswith("button:"):
+            label = self.app_settings.title_hotkey_label or action[len("button:"):]
+            self.current_shortcut_label.setText(f"Currently bound to: {label}")
+        else:
+            self.current_shortcut_label.setText("No shortcut set.")
+
+    def _on_clear_shortcut(self):
+        self.app_settings.title_hotkey_action = "none"
+        self.app_settings.title_hotkey_label = ""
+        save_app_settings(self.app_settings)
+        self._refresh_customization_status()
+        self.settings_updated.emit()

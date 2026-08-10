@@ -21,6 +21,8 @@ def load_app_settings() -> AppSettings:
             room_setup_layout=data.get("room_setup_layout", defaults.room_setup_layout),
             font_family=data.get("font_family", defaults.font_family),
             theme=data.get("theme", defaults.theme),
+            title_hotkey_action=data.get("title_hotkey_action", defaults.title_hotkey_action),
+            title_hotkey_label=data.get("title_hotkey_label", defaults.title_hotkey_label),
         )
     return AppSettings()
 
@@ -36,6 +38,8 @@ def save_app_settings(settings: AppSettings):
         "room_setup_layout": settings.room_setup_layout,
         "font_family": settings.font_family,
         "theme": settings.theme,
+        "title_hotkey_action": settings.title_hotkey_action,
+        "title_hotkey_label": settings.title_hotkey_label,
     }
     with open(SETTINGS_FILE, "w") as f:
         json.dump(data, f, indent=2)
