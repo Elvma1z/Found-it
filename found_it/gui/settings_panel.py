@@ -1301,8 +1301,35 @@ class SettingsPanel(QWidget):
         scale = target_width / width
         target_height = max(round(height * scale), 30)
 
+        # Reaching here, the widget was just pulled out of a dock area (or
+        # a QStackedWidget page) via removeDockWidget()/removeWidget() -
+        # neither of those actually clears the widget's parent, they just
+        # stop the old layout from managing it. QGraphicsScene.addWidget()
+        # silently no-ops on a still-parented widget (proxy.widget() comes
+        # back None, painting as an empty box), so it has to be explicitly
+        # orphaned - and shown, since the old layout left it hidden - before
+        # handing it to the scene.
+        widget.setParent(None)
+        widget.resize(width, height)
+        widget.setVisible(True)
+        # Room Tracker's sub-panels get their dark background from inheriting
+        # preview_window's stylesheet - once detached from that ancestor
+        # chain they fall back to Qt's default (light) palette. Appended
+        # (not replacing) so panels with their own full widget_qss keep it;
+        # a bare "QWidget" rule is low-specificity enough not to fight any
+        # more specific selector already in that stylesheet.
+        widget.setStyleSheet(
+            widget.styleSheet() + f"\nQWidget {{ background-color: {self.palette['bg']}; }}"
+        )
+
         scene = QGraphicsScene(self)
-        scene.addWidget(widget)
+        proxy = scene.addWidget(widget)
+        # addWidget() carries over wherever the widget used to sit inside its
+        # old parent (e.g. a dock docked on the right edge of the 1350px-wide
+        # preview lands at x=1010+) instead of resetting to the origin - left
+        # alone, the proxy sits entirely outside the scene rect below and the
+        # thumbnail renders as an empty box.
+        proxy.setPos(0, 0)
         scene.setSceneRect(0, 0, width, height)
 
         view = QGraphicsView(scene)
