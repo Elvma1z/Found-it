@@ -5,7 +5,7 @@ a = Analysis(
     ['found_it\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('found_it\\resources\\app_icon.ico', 'found_it\\resources')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -52,4 +52,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='found_it\\resources\\app_icon.ico',
 )

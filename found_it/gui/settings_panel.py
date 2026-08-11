@@ -10,8 +10,8 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QMainWindow, QDockWidget, QScrollArea, QTabWidget, QComboBox,
     QGraphicsScene, QGraphicsView
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject, QEvent
-from PyQt5.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter, QColor
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject, QEvent, QMimeData
+from PyQt5.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter, QColor, QDrag
 
 from found_it.config import DATA_DIR, DB_PATH, SNAPSHOTS_DIR
 from found_it.storage.database import Database
@@ -62,6 +62,63 @@ PREVIEW_HEIGHT = 600
 PREVIEW_SCALE = 0.62
 SIDEBAR_WIDTH = 320
 SIDEBAR_THUMBNAIL_WIDTH = 280
+
+PANEL_DRAG_MIME = "application/x-founditpanel"
+
+
+class _PanelThumbnailView(QGraphicsView):
+    """A sidebar panel thumbnail. Press-and-drag it onto the live preview to
+    restore that panel to the app UI container it was cleared from."""
+
+    def __init__(self, scene, entry_id: str):
+        super().__init__(scene)
+        self._entry_id = entry_id
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is not None and event.buttons() & Qt.LeftButton:
+            if (event.pos() - self._press_pos).manhattanLength() >= QApplication.startDragDistance():
+                self._press_pos = None
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setData(PANEL_DRAG_MIME, self._entry_id.encode("utf-8"))
+                drag.setMimeData(mime)
+                drag.setPixmap(self.grab())
+                drag.exec_(Qt.MoveAction)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+
+class _PreviewDropView(QGraphicsView):
+    """The live preview surface. Accepts a sidebar thumbnail dropped onto it
+    and hands it back to SettingsPanel to restore into the real layout."""
+
+    def __init__(self, scene, owner: "SettingsPanel"):
+        super().__init__(scene)
+        self._owner = owner
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(PANEL_DRAG_MIME):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(PANEL_DRAG_MIME):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        entry_id = bytes(event.mimeData().data(PANEL_DRAG_MIME)).decode("utf-8")
+        if self._owner._restore_sidebar_entry(entry_id):
+            event.acceptProposedAction()
 
 
 class SettingsPanel(QWidget):
@@ -236,6 +293,8 @@ class SettingsPanel(QWidget):
                 header.setStyleSheet(f"color: {p['text']};")
             for sep in self._sidebar_category_seps:
                 sep.setStyleSheet(f"background-color: {p['border']};")
+            for label in self._sidebar_item_labels:
+                label.setStyleSheet(f"color: {p['text_dim']};")
 
         for blank in getattr(self, "_preview_blank_widgets", []):
             blank.setStyleSheet(f"background-color: {p['bg']};")
@@ -888,8 +947,13 @@ class SettingsPanel(QWidget):
     def _build_panel_customization_section(self, layout: QVBoxLayout):
         self._sidebar_category_headers = {}
         self._sidebar_category_seps = []
+        self._sidebar_item_labels = []
         self._preview_blank_widgets = []
         self._panels_cleared = False
+        self._sidebar_entries = {}
+        self._sidebar_entry_seq = 0
+        self._sidebar_category_counts = {}
+        self._retained_screens = {}
 
         pc_title = QLabel("Panel Customization")
         pc_title.setFont(QFont("Segoe UI", 13, QFont.Bold))
@@ -899,7 +963,8 @@ class SettingsPanel(QWidget):
         pc_desc = QLabel(
             "A live, working replica of the app, boxed to a fixed size so it stays out of the "
             "way. Drag the tabs or the Cameras / Found Items panels around inside it to try out "
-            "a layout — nothing in the real app changes until you click \"Save Project\"."
+            "a layout — nothing in the real app changes until you click \"Save Project\". Panels "
+            "moved to the sidebar can be dragged back onto the preview to restore them."
         )
         pc_desc.setProperty("cls", "muted")
         pc_desc.setWordWrap(True)
@@ -1089,7 +1154,7 @@ class SettingsPanel(QWidget):
         scene.addWidget(self.preview_frame)
         scene.setSceneRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT)
 
-        self.preview_view = QGraphicsView(scene)
+        self.preview_view = _PreviewDropView(scene, self)
         self.preview_view.setFixedSize(scaled_w, scaled_h)
         self.preview_view.setFrameShape(QFrame.NoFrame)
         self.preview_view.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -1287,7 +1352,7 @@ class SettingsPanel(QWidget):
             return ["found_items_dock", "camera_dock"]
         return ["camera_dock", "found_items_dock"]
 
-    def _wrap_as_thumbnail(self, widget: QWidget, size: QSize = None,
+    def _wrap_as_thumbnail(self, widget: QWidget, entry_id: str, size: QSize = None,
                             target_width: int = SIDEBAR_THUMBNAIL_WIDTH) -> QGraphicsView:
         """Shrinks a real widget to sidebar width the same way the main
         preview is scaled down, so a cleared panel (even a whole real one
@@ -1332,7 +1397,7 @@ class SettingsPanel(QWidget):
         proxy.setPos(0, 0)
         scene.setSceneRect(0, 0, width, height)
 
-        view = QGraphicsView(scene)
+        view = _PanelThumbnailView(scene, entry_id)
         view.setFixedSize(target_width, target_height)
         view.setFrameShape(QFrame.NoFrame)
         view.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -1340,6 +1405,7 @@ class SettingsPanel(QWidget):
         view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         view.scale(scale, scale)
         view.setStyleSheet(f"border: 1px solid {self.palette['border']}; border-radius: 4px;")
+        view.setCursor(Qt.OpenHandCursor)
         return view
 
     def _blank_panel(self) -> QWidget:
@@ -1349,9 +1415,15 @@ class SettingsPanel(QWidget):
         return blank
 
     def _add_to_sidebar_category(self, category: str, items: list):
-        """items: list of (widget, size) - size captured before the widget
-        was detached from its old layout, since a hidden/reparented widget
-        can no longer be trusted to report its own size."""
+        """items: list of (title_or_None, widget, size, restore_fn). size is
+        captured before the widget was detached from its old layout, since a
+        hidden/reparented widget can no longer be trusted to report its own
+        size. title labels a specific piece within the category (e.g.
+        "Search" inside the File Search tab) - leave it None for a widget
+        that already carries its own visible title (a dock, a
+        CollapsibleSection), so it doesn't get labeled twice. restore_fn puts
+        the widget back where it came from when its thumbnail is dragged
+        onto the preview."""
         insert_at = self.sidebar_content_layout.count() - 1  # keep the trailing stretch last
 
         if category not in self._sidebar_category_headers:
@@ -1370,10 +1442,143 @@ class SettingsPanel(QWidget):
             self.sidebar_content_layout.insertWidget(insert_at, header)
             insert_at += 1
 
-        for widget, size in items:
-            thumb = self._wrap_as_thumbnail(widget, size=size)
+        for title, widget, size, restore_fn in items:
+            label = None
+            if title:
+                label = QLabel(title)
+                label.setFont(QFont(self.app_settings.font_family, 10, QFont.Bold))
+                label.setStyleSheet(f"color: {self.palette['text_dim']};")
+                self._sidebar_item_labels.append(label)
+                self.sidebar_content_layout.insertWidget(insert_at, label)
+                insert_at += 1
+
+            self._sidebar_entry_seq += 1
+            entry_id = str(self._sidebar_entry_seq)
+            thumb = self._wrap_as_thumbnail(widget, entry_id, size=size)
             self.sidebar_content_layout.insertWidget(insert_at, thumb)
             insert_at += 1
+
+            self._sidebar_entries[entry_id] = {
+                "restore": restore_fn, "thumb": thumb, "label": label, "category": category,
+            }
+            self._sidebar_category_counts[category] = self._sidebar_category_counts.get(category, 0) + 1
+
+    def _cleanup_empty_sidebar_category(self, category: str):
+        count = self._sidebar_category_counts.get(category, 0) - 1
+        self._sidebar_category_counts[category] = count
+        if count <= 0:
+            header = self._sidebar_category_headers.get(category)
+            if header is not None:
+                header.setVisible(False)
+
+    def _restore_sidebar_entry(self, entry_id: str) -> bool:
+        entry = self._sidebar_entries.pop(entry_id, None)
+        if entry is None:
+            return False
+
+        entry["restore"]()
+
+        self.sidebar_content_layout.removeWidget(entry["thumb"])
+        entry["thumb"].setParent(None)
+        entry["thumb"].deleteLater()
+        if entry["label"] is not None:
+            self.sidebar_content_layout.removeWidget(entry["label"])
+            entry["label"].setParent(None)
+            entry["label"].deleteLater()
+
+        self._cleanup_empty_sidebar_category(entry["category"])
+        self._on_panel_customization_changed()
+        return True
+
+    def _restore_center_panel(self, widget: QWidget):
+        old = self.preview_window.centralWidget()
+        self.preview_window.setCentralWidget(widget)
+        if old is not None and old is not widget:
+            old.deleteLater()
+
+    def _restore_screen_if_needed(self, key: str):
+        """Swaps the blank placeholder left behind in preview_stack for the
+        real screen it replaced, the first time any piece of that screen is
+        dragged back. A no-op once the screen is already back in place."""
+        screen = self._retained_screens.get(key)
+        if screen is None or self.preview_screens.get(key) is screen:
+            return screen
+
+        blank = self.preview_screens[key]
+        was_current = self.preview_stack.currentWidget() is blank
+        idx = self.preview_stack.indexOf(blank)
+        self.preview_stack.insertWidget(idx, screen)
+        self.preview_stack.removeWidget(blank)
+        blank.deleteLater()
+        self.preview_screens[key] = screen
+        if was_current:
+            self.preview_stack.setCurrentWidget(screen)
+        return screen
+
+    def _restore_room_setup_canvas(self, panel: RoomSetupPanel, canvas_area: QWidget):
+        self._restore_screen_if_needed("room_setup")
+        panel.dock_host.setCentralWidget(canvas_area)
+
+    def _restore_room_setup_section(self, panel: RoomSetupPanel, section: QWidget, idx: int):
+        self._restore_screen_if_needed("room_setup")
+        panel._right_container_layout.insertWidget(idx, section)
+
+    def _restore_file_tab(self, panel: FileSearchPanel, widget: QWidget, label: str, idx: int):
+        self._restore_screen_if_needed("file")
+        panel.tabs.insertTab(idx, widget, label)
+
+    def _split_room_setup_panel(self, panel: RoomSetupPanel) -> list:
+        """(title_or_None, widget, size, restore_fn) per Room Setup's natural
+        sections, instead of one solid block - the profile/dimensions/canvas
+        area, then each already-titled CollapsibleSection (Cameras,
+        Zones / Furniture, Drawers, Detected Objects) pulled out
+        individually. Each restore_fn puts its piece back at the same spot
+        in the panel it came from."""
+        items = []
+        # takeCentralWidget() (not centralWidget()) - it also clears
+        # dock_host's own record of having a central widget. Reading the
+        # widget and yanking it out from under the layout with a bare
+        # setParent(None) (as _wrap_as_thumbnail does) leaves that record
+        # stale, and later a restore's setCentralWidget(canvas_area) becomes
+        # a no-op (Qt sees the same widget pointer it already "has") -
+        # silently dropping the widget with no parent at all.
+        canvas_area = panel.dock_host.takeCentralWidget()
+        if canvas_area is not None:
+            items.append((
+                "Room Setup", canvas_area, canvas_area.size(),
+                lambda p=panel, c=canvas_area: self._restore_room_setup_canvas(p, c),
+            ))
+        for idx, section in enumerate(getattr(panel, "_collapsible_sections", [])):
+            size = section.size()
+            # Same reason as takeCentralWidget() above: tell the layout the
+            # section is gone before it gets ripped out, so re-inserting it
+            # later isn't fighting a stale QLayoutItem still pointing at it.
+            panel._right_container_layout.removeWidget(section)
+            items.append((
+                None, section, size,
+                lambda p=panel, s=section, i=idx: self._restore_room_setup_section(p, s, i),
+            ))
+        return items
+
+    def _split_file_search_panel(self, panel: FileSearchPanel) -> list:
+        """Search and People are only visually distinguished by their tab
+        bar - once pulled out of the QTabWidget that labeling goes with it,
+        so each gets an explicit title instead. Sized off the tab widget
+        itself rather than the individual pages: Qt never lays out a tab
+        page that isn't current, so the not-currently-shown one would
+        otherwise report a stale/zero size."""
+        page_size = panel.tabs.size()
+        items = [
+            ("Search", panel.search_tab, page_size,
+             lambda p=panel: self._restore_file_tab(p, p.search_tab, "Search", 0)),
+            ("People", panel.people_tab, page_size,
+             lambda p=panel: self._restore_file_tab(p, p.people_tab, "People", 1)),
+        ]
+        # Same stale-layout-item hazard as Room Setup's sections above -
+        # removeTab() before the tab pages get pulled out from under it.
+        panel.tabs.removeTab(panel.tabs.indexOf(panel.people_tab))
+        panel.tabs.removeTab(panel.tabs.indexOf(panel.search_tab))
+        return items
 
     def _on_clear_panels(self):
         if self._panels_cleared:
@@ -1391,22 +1596,32 @@ class SettingsPanel(QWidget):
         self.preview_window.setCentralWidget(self._blank_panel())
 
         self._add_to_sidebar_category("Room Tracker", [
-            (self.preview_camera_dock, cam_size),
-            (self.preview_found_dock, found_size),
-            (center, center_size),
+            (None, self.preview_camera_dock, cam_size,
+             lambda: self.preview_window.addDockWidget(Qt.LeftDockWidgetArea, self.preview_camera_dock)),
+            (None, self.preview_found_dock, found_size,
+             lambda: self.preview_window.addDockWidget(Qt.RightDockWidgetArea, self.preview_found_dock)),
+            (None, center, center_size, lambda w=center: self._restore_center_panel(w)),
         ])
 
-        # --- the other tabs: one whole panel each ---
+        # --- the other tabs: broken up by their own titled sections where
+        # they have any (Other Devices doesn't, so it stays one piece) ---
+        splitters = {"room_setup": self._split_room_setup_panel, "file": self._split_file_search_panel}
         for key in ("room_setup", "file", "device"):
             screen = self.preview_screens.get(key)
             if screen is None:
                 continue
+            self._retained_screens[key] = screen
             screen_size = screen.size()
+            split = splitters.get(key)
+            items = split(screen) if split else [
+                (None, screen, screen_size, lambda k=key: self._restore_screen_if_needed(k))
+            ]
+
             idx = self.preview_stack.indexOf(screen)
             self.preview_stack.insertWidget(idx, self._blank_panel())
             self.preview_stack.removeWidget(screen)
             self.preview_screens[key] = self.preview_stack.widget(idx)
-            self._add_to_sidebar_category(NAV_TAB_LABELS[key], [(screen, screen_size)])
+            self._add_to_sidebar_category(NAV_TAB_LABELS[key], items)
 
         self.preview_stack.setCurrentWidget(self.preview_screens["room"])
         if self.hero_list.count():
