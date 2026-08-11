@@ -444,6 +444,50 @@ class RoomCanvas(QWidget):
         super().keyPressEvent(event)
 
 
+class CollapsibleSection(QWidget):
+    """A titled header bar that shows/hides its body when clicked, used to
+    stack Cameras/Zones/Drawers/Detected Objects in one column that scrolls
+    as a whole instead of each section carrying its own scrollbar."""
+
+    def __init__(self, title: str, content: QWidget, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._title = title
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setChecked(True)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self._on_toggled)
+        layout.addWidget(self.toggle_btn)
+
+        self.content = content
+        layout.addWidget(self.content)
+
+        self._update_text()
+
+    def _on_toggled(self):
+        self.content.setVisible(self.toggle_btn.isChecked())
+        self._update_text()
+
+    def _update_text(self):
+        arrow = "▾" if self.toggle_btn.isChecked() else "▸"
+        self.toggle_btn.setText(f"{arrow}  {self._title}")
+
+    def apply_theme(self, palette: dict):
+        p = palette
+        self.toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                text-align: left; background: {p['header']}; color: {p['text']};
+                font-weight: bold; font-size: 12px; padding: 8px 10px;
+                border: 1px solid {p['border']}; border-radius: 4px;
+            }}
+            QPushButton:hover {{ background: {p['selected']}; }}
+        """)
+
+
 class RoomSetupPanel(QWidget):
     """Lets the user size their room, lay out named zones/furniture, and rename detected objects."""
 
@@ -488,6 +532,8 @@ class RoomSetupPanel(QWidget):
         """)
         repolish(self)
         self.canvas.apply_theme(palette)
+        for section in self._collapsible_sections:
+            section.apply_theme(palette)
 
         self.dock_host.setStyleSheet(f"""
             QMainWindow {{ background-color: {p['bg']}; }}
@@ -521,9 +567,9 @@ class RoomSetupPanel(QWidget):
             pass
 
     def save_layout(self):
-        """Persist the current dock panel arrangement (sizes/positions/floating
-        state) so Cameras/Zones/Drawers/Detected Objects reopen where the user
-        left them - called on app close, same as Room Tracker's own layout."""
+        """Persist the current dock panel arrangement (size/position/floating
+        state) so the Room Setup panel reopens where the user left it -
+        called on app close, same as Room Tracker's own layout."""
         state = self.dock_host.saveState()
         settings = load_app_settings()
         settings.room_setup_layout = bytes(state.toBase64()).decode()
@@ -725,15 +771,6 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(camera_action_row)
         right_layout.addStretch()
 
-        self.cameras_dock = QDockWidget("Cameras", self.dock_host)
-        self.cameras_dock.setObjectName("cameras_dock")
-        self.cameras_dock.setWidget(cameras_widget)
-        self.cameras_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.cameras_dock)
-        view_menu.addAction(self.cameras_dock.toggleViewAction())
-
         # --- Zones / Furniture panel ---
         zones_widget = QWidget()
         right_layout = QVBoxLayout(zones_widget)
@@ -800,15 +837,6 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(rename_row)
         right_layout.addStretch()
 
-        self.zones_dock = QDockWidget("Zones / Furniture", self.dock_host)
-        self.zones_dock.setObjectName("zones_dock")
-        self.zones_dock.setWidget(zones_widget)
-        self.zones_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.zones_dock)
-        view_menu.addAction(self.zones_dock.toggleViewAction())
-
         # --- Drawers panel ---
         drawers_widget = QWidget()
         right_layout = QVBoxLayout(drawers_widget)
@@ -856,15 +884,6 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(drawer_rename_row)
         right_layout.addStretch()
 
-        self.drawers_dock = QDockWidget("Drawers", self.dock_host)
-        self.drawers_dock.setObjectName("drawers_dock")
-        self.drawers_dock.setWidget(drawers_widget)
-        self.drawers_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.drawers_dock)
-        view_menu.addAction(self.drawers_dock.toggleViewAction())
-
         # --- Detected Objects panel ---
         objects_widget = QWidget()
         right_layout = QVBoxLayout(objects_widget)
@@ -894,20 +913,39 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(object_row)
         right_layout.addStretch()
 
-        self.objects_dock = QDockWidget("Detected Objects", self.dock_host)
-        self.objects_dock.setObjectName("objects_dock")
-        self.objects_dock.setWidget(objects_widget)
-        self.objects_dock.setFeatures(
+        # Cameras/Zones/Drawers/Detected Objects are stacked as collapsible
+        # sections in one column - clicking a section's header bar folds it
+        # away, and the column scrolls as a whole (one scrollbar) instead of
+        # each section carrying its own.
+        right_container = QWidget()
+        right_container_layout = QVBoxLayout(right_container)
+        right_container_layout.setContentsMargins(6, 6, 6, 6)
+        right_container_layout.setSpacing(8)
+        self._right_container_layout = right_container_layout
+
+        self._collapsible_sections: List[CollapsibleSection] = []
+        for title, widget in [
+            ("Cameras", cameras_widget),
+            ("Zones / Furniture", zones_widget),
+            ("Drawers", drawers_widget),
+            ("Detected Objects", objects_widget),
+        ]:
+            section = CollapsibleSection(title, widget)
+            self._collapsible_sections.append(section)
+            right_container_layout.addWidget(section)
+        right_container_layout.addStretch()
+
+        self.panels_dock = QDockWidget("Room Setup", self.dock_host)
+        self.panels_dock.setObjectName("panels_dock")
+        self.panels_dock.setWidget(self._scrollable(right_container))
+        self.panels_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
         )
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.objects_dock)
-        view_menu.addAction(self.objects_dock.toggleViewAction())
+        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.panels_dock)
+        view_menu.addAction(self.panels_dock.toggleViewAction())
 
-        # Cameras/Zones/Drawers/Detected Objects are now independent dock
-        # panels - drag by their title bar to move or tab them together,
-        # drag an edge to resize, or float/close them (reopen via the
-        # "Panels" menu). "Save Room" stays outside the dock area, always
-        # reachable no matter how the panels get rearranged.
+        # "Save Room" stays outside the dock area, always reachable no
+        # matter how the panel gets floated/resized.
         outer.addWidget(self.dock_host, 1)
 
         save_row = QHBoxLayout()
@@ -928,6 +966,17 @@ class RoomSetupPanel(QWidget):
         lbl = QLabel(text)
         lbl.setProperty("cls", "muted")
         return lbl
+
+    def _scrollable(self, widget: QWidget) -> QScrollArea:
+        """Wrap a dock panel's content so it scrolls instead of getting
+        squeezed/overlapping when several docks share the same area and
+        there isn't enough height for all of them at once."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
+        return scroll
 
     def _load_from_config(self):
         profile = self._active_profile()

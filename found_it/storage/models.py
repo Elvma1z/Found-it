@@ -60,3 +60,7 @@ class AppSettings:
     room_setup_layout: str = ""
     font_family: str = "Segoe UI"
     theme: str = "Indigo"
+    title_hotkey_action: str = "none"
+    title_hotkey_label: str = ""
+    nav_tab_order: str = ""
+    dock_panel_order: str = ""

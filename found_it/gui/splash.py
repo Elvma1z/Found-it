@@ -97,3 +97,53 @@ def create_splash_screen(palette: dict) -> QSplashScreen:
 def splash_show_message(splash: QSplashScreen, text: str):
     message_color = getattr(splash, "_theme_colors", {}).get("message", QColor("#aaaaaa"))
     splash.showMessage(text, Qt.AlignBottom | Qt.AlignHCenter, message_color)
+
+
+def build_notice_pixmap(palette: dict, title: str, message: str) -> QPixmap:
+    """A themed splash pixmap for in-app notices (e.g. warning the user a
+    layout change is about to take effect), reusing the startup splash's
+    look instead of a plain QMessageBox."""
+    colors = _splash_colors(palette)
+
+    pixmap = QPixmap(WIDTH, HEIGHT)
+    pixmap.fill(colors["bg"])
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    accent = QColor(palette["accent"])
+    ring_rect = QRectF(WIDTH / 2 - 40, HEIGHT * 0.22, 80, 80)
+    painter.setPen(QPen(colors["rim"], 6))
+    painter.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 45)))
+    painter.drawEllipse(ring_rect)
+    painter.setPen(QPen(colors["title"], 6, Qt.SolidLine, Qt.RoundCap))
+    cx, cy = WIDTH / 2, HEIGHT * 0.22 + 40
+    painter.drawLine(int(cx), int(cy - 18), int(cx), int(cy + 6))
+    painter.drawPoint(int(cx), int(cy + 20))
+
+    painter.setPen(colors["title"])
+    painter.setFont(QFont("Segoe UI", 18, QFont.Bold))
+    painter.drawText(QRectF(20, HEIGHT * 0.56, WIDTH - 40, 32), Qt.AlignCenter, title)
+
+    painter.setPen(colors["subtitle"])
+    painter.setFont(QFont("Segoe UI", 10))
+    text_rect = QRectF(30, HEIGHT * 0.56 + 36, WIDTH - 60, HEIGHT * 0.38)
+    painter.drawText(text_rect, Qt.AlignHCenter | Qt.TextWordWrap, message)
+
+    painter.end()
+    return pixmap
+
+
+def create_notice_splash(palette: dict, title: str, message: str) -> QSplashScreen:
+    splash = QSplashScreen(build_notice_pixmap(palette, title, message))
+    splash._theme_colors = _splash_colors(palette)
+
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        geo = screen.availableGeometry()
+        splash.move(
+            geo.center().x() - splash.width() // 2,
+            geo.center().y() - splash.height() // 2,
+        )
+
+    return splash

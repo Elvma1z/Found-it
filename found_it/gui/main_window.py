@@ -1,10 +1,29 @@
+import json
+
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QCheckBox, QTabWidget,
-    QPushButton, QMenu, QDockWidget, QComboBox
+    QPushButton, QMenu, QDockWidget, QComboBox, QApplication
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, QByteArray, QEvent
+from PyQt5.QtCore import Qt, QTimer, QThread, QByteArray, QEvent, pyqtSignal
 from PyQt5.QtGui import QFont
+
+NAV_TAB_KEYS_DEFAULT = ["room", "room_setup", "file", "device"]
+DOCK_PANEL_KEYS_DEFAULT = ["camera_dock", "found_items_dock"]
+
+
+class ClickableLabel(QLabel):
+    """A QLabel that emits clicked() and swallows the press so it doesn't
+    also trigger the parent TitleBar's window-drag handling."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class TitleBar(QWidget):
@@ -59,6 +78,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 700)
         self.resize(1400, 800)
 
+        self._binding_shortcut = False
+
         self.room_profiles = load_room_profiles()
         self.app_settings = load_app_settings()
         self.palette = get_palette(self.app_settings.theme)
@@ -86,11 +107,15 @@ class MainWindow(QMainWindow):
         p = self.palette
         return f"""
             QPushButton {{
-                background: transparent; color: {p['text_dim']}; border: none;
+                background: transparent; color: {p['text_dim']};
+                border: none; border-bottom: 2px solid transparent;
                 padding: 8px 20px; font-size: 13px; font-weight: bold;
                 border-radius: 4px; {extra}
             }}
-            QPushButton:checked {{ background-color: {p['selected']}; color: {p['text']}; }}
+            QPushButton:checked {{
+                background-color: {p['selected']}; color: {p['text']};
+                border-bottom: 2px solid {p['accent']};
+            }}
             QPushButton:hover {{ color: {p['text']}; }}
         """
 
@@ -105,9 +130,11 @@ class MainWindow(QMainWindow):
         self.nav_bar.setFixedHeight(48)
         nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(12, 0, 0, 0)
+        self.nav_layout = nav_layout
 
-        self.app_title = QLabel("Found It")
+        self.app_title = ClickableLabel("Found It")
         self.app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.app_title.clicked.connect(self._on_title_clicked)
         nav_layout.addWidget(self.app_title)
 
         nav_layout.addSpacing(24)
@@ -116,22 +143,27 @@ class MainWindow(QMainWindow):
         self.mode_room_btn.setCheckable(True)
         self.mode_room_btn.setChecked(True)
         self.mode_room_btn.clicked.connect(lambda: self._switch_mode("room"))
-        nav_layout.addWidget(self.mode_room_btn)
 
         self.mode_room_setup_btn = QPushButton("Room Setup")
         self.mode_room_setup_btn.setCheckable(True)
         self.mode_room_setup_btn.clicked.connect(lambda: self._switch_mode("room_setup"))
-        nav_layout.addWidget(self.mode_room_setup_btn)
 
         self.mode_file_btn = QPushButton("File Search")
         self.mode_file_btn.setCheckable(True)
         self.mode_file_btn.clicked.connect(lambda: self._switch_mode("file"))
-        nav_layout.addWidget(self.mode_file_btn)
 
         self.mode_device_btn = QPushButton("Other Devices")
         self.mode_device_btn.setCheckable(True)
         self.mode_device_btn.clicked.connect(lambda: self._switch_mode("device"))
-        nav_layout.addWidget(self.mode_device_btn)
+
+        self.nav_mode_buttons = {
+            "room": self.mode_room_btn,
+            "room_setup": self.mode_room_setup_btn,
+            "file": self.mode_file_btn,
+            "device": self.mode_device_btn,
+        }
+        self._nav_tabs_insert_index = nav_layout.count()
+        self._apply_nav_tab_order()
 
         nav_layout.addStretch()
 
@@ -178,6 +210,7 @@ class MainWindow(QMainWindow):
         self.settings_panel.settings_updated.connect(self._on_settings_updated)
         self.settings_panel.connect_device_requested.connect(self._on_connect_saved_device)
         self.settings_panel.rooms_imported.connect(self._on_rooms_imported)
+        self.settings_panel.find_shortcut_requested.connect(self.start_shortcut_binding)
 
         self.content_layout.addWidget(self.room_widget)
         self.content_layout.addWidget(self.room_setup_panel)
@@ -201,6 +234,7 @@ class MainWindow(QMainWindow):
 
         self.nav_bar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
         self.app_title.setStyleSheet(f"color: {p['accent']};")
+        self._refresh_title_hotkey()
 
         nav_style = self._nav_button_style()
         for btn in (self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn, self.mode_device_btn):
@@ -383,9 +417,52 @@ class MainWindow(QMainWindow):
 
         tracker.setCentralWidget(center_panel)
 
+        self.room_widget = tracker
+        self._apply_dock_panel_order()
+
         self._restore_room_tracker_layout(tracker)
 
         return tracker
+
+    def _get_nav_tab_order(self) -> list:
+        raw = self.app_settings.nav_tab_order
+        if raw:
+            try:
+                order = json.loads(raw)
+                if sorted(order) == sorted(NAV_TAB_KEYS_DEFAULT):
+                    return order
+            except (ValueError, TypeError):
+                pass
+        return list(NAV_TAB_KEYS_DEFAULT)
+
+    def _apply_nav_tab_order(self):
+        order = self._get_nav_tab_order()
+        for btn in self.nav_mode_buttons.values():
+            self.nav_layout.removeWidget(btn)
+        for i, key in enumerate(order):
+            btn = self.nav_mode_buttons.get(key)
+            if btn is not None:
+                self.nav_layout.insertWidget(self._nav_tabs_insert_index + i, btn)
+
+    def _get_dock_panel_order(self) -> list:
+        raw = self.app_settings.dock_panel_order
+        if raw:
+            try:
+                order = json.loads(raw)
+                if sorted(order) == sorted(DOCK_PANEL_KEYS_DEFAULT):
+                    return order
+            except (ValueError, TypeError):
+                pass
+        return list(DOCK_PANEL_KEYS_DEFAULT)
+
+    def _apply_dock_panel_order(self):
+        order = self._get_dock_panel_order()
+        docks = {"camera_dock": self.camera_dock, "found_items_dock": self.found_items_dock}
+        areas = [Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea]
+        for area, key in zip(areas, order):
+            dock = docks.get(key)
+            if dock is not None:
+                self.room_widget.addDockWidget(area, dock)
 
     def _toggle_maximize(self):
         if self.isMaximized():
@@ -426,6 +503,127 @@ class MainWindow(QMainWindow):
         elif mode == "settings":
             self.settings_panel.show()
             self.settings_btn.setChecked(True)
+
+    # ---------------- Title shortcut: bind "Found It" to any button ----------------
+
+    def _build_shortcut_registry(self):
+        """Map every QPushButton reachable from self via attributes (recursing
+        into nested panels/tabs) to a dotted path, e.g. "room_setup_panel.scan_room_btn".
+        Rebuilt lazily so buttons created after startup (rare) still get picked up."""
+        self._shortcut_paths = {}
+        self._shortcut_buttons = {}
+        self._collect_button_paths(self, "", set(), self._shortcut_paths, self._shortcut_buttons)
+
+    def _collect_button_paths(self, root, prefix, seen, paths, buttons, depth=0):
+        if depth > 6 or id(root) in seen:
+            return
+        seen.add(id(root))
+        try:
+            items = list(vars(root).items())
+        except TypeError:
+            return
+        for name, value in items:
+            if name.startswith("_"):
+                continue
+            path = f"{prefix}.{name}" if prefix else name
+            if isinstance(value, QPushButton):
+                paths[path] = value
+                buttons[id(value)] = path
+            elif isinstance(value, QWidget):
+                self._collect_button_paths(value, path, seen, paths, buttons, depth + 1)
+
+    def _shortcut_excluded_buttons(self):
+        return {
+            self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn,
+            self.mode_device_btn, self.settings_btn,
+            self.minimize_btn, self.maximize_btn, self.close_btn,
+        }
+
+    def start_shortcut_binding(self):
+        self._build_shortcut_registry()
+        self._binding_shortcut = True
+        self._switch_mode("room")
+        self.statusBar().showMessage(
+            "Double-click any button to make it the \"Found It\" shortcut. Tabs still work "
+            "normally. Press Esc to cancel."
+        )
+        QApplication.instance().installEventFilter(self)
+
+    def _stop_shortcut_binding(self):
+        self._binding_shortcut = False
+        QApplication.instance().removeEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if getattr(self, "_binding_shortcut", False):
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self._stop_shortcut_binding()
+                self.statusBar().showMessage("Shortcut selection cancelled.", 3000)
+                return True
+            if event.type() == QEvent.MouseButtonDblClick and isinstance(obj, QPushButton):
+                if obj in self._shortcut_excluded_buttons():
+                    return False
+                path = self._shortcut_buttons.get(id(obj))
+                self._stop_shortcut_binding()
+                if path is not None:
+                    self.app_settings.title_hotkey_action = f"button:{path}"
+                    self.app_settings.title_hotkey_label = obj.text() or path.rsplit(".", 1)[-1]
+                    save_app_settings(self.app_settings)
+                    self._refresh_title_hotkey()
+                    self.statusBar().showMessage(
+                        f"\"Found It\" now opens: {self.app_settings.title_hotkey_label}", 4000
+                    )
+                else:
+                    self.statusBar().showMessage("That button can't be used as a shortcut.", 4000)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _refresh_title_hotkey(self):
+        action = self.app_settings.title_hotkey_action
+        if action.startswith("button:"):
+            self.app_title.setCursor(Qt.PointingHandCursor)
+            label = self.app_settings.title_hotkey_label or action[len("button:"):]
+            self.app_title.setToolTip(f"Shortcut: {label}")
+        else:
+            self.app_title.setCursor(Qt.ArrowCursor)
+            self.app_title.setToolTip("")
+
+    def _on_title_clicked(self):
+        action = self.app_settings.title_hotkey_action
+        if not action.startswith("button:"):
+            return
+        path = action[len("button:"):]
+        if not hasattr(self, "_shortcut_paths"):
+            self._build_shortcut_registry()
+        btn = self._shortcut_paths.get(path)
+        if btn is None:
+            self._build_shortcut_registry()
+            btn = self._shortcut_paths.get(path)
+        if btn is not None:
+            self._reveal_and_click(btn)
+
+    def _reveal_and_click(self, btn: QPushButton):
+        # Show whichever nested QTabWidget page(s) the button lives inside.
+        for tabs in self.findChildren(QTabWidget):
+            if tabs.isAncestorOf(btn):
+                for i in range(tabs.count()):
+                    if tabs.widget(i) is btn or tabs.widget(i).isAncestorOf(btn):
+                        tabs.setCurrentIndex(i)
+                        break
+
+        # Show whichever top-level mode panel the button lives inside.
+        panels = {
+            "room": self.room_widget,
+            "room_setup": self.room_setup_panel,
+            "file": self.file_search_panel,
+            "device": self.device_search_panel,
+            "settings": self.settings_panel,
+        }
+        for mode, panel in panels.items():
+            if panel.isAncestorOf(btn):
+                self._switch_mode(mode)
+                break
+
+        btn.click()
 
     def _show_room_menu(self):
         menu = QMenu(self)
@@ -472,6 +670,8 @@ class MainWindow(QMainWindow):
         self.palette = get_palette(self.app_settings.theme)
         self._apply_theme()
         self.dewarp_check.setChecked(self.app_settings.dewarp_default)
+        self._apply_nav_tab_order()
+        self._apply_dock_panel_order()
         self._start_all_room_cameras()
 
     def _on_connect_saved_device(self, serial: str):

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -26,9 +26,11 @@ def _load():
     return _face_recognition
 
 
-def get_face_encodings(image_path: str) -> List[np.ndarray]:
-    """One 128-d encoding per face detected in the image. Empty if the library
-    isn't installed, the file isn't readable, or no faces were found."""
+def get_faces_with_locations(image_path: str) -> List[Tuple[np.ndarray, tuple]]:
+    """One (encoding, bbox) pair per face detected in the image, bbox in
+    face_recognition's own (top, right, bottom, left) convention. Empty if
+    the library isn't installed, the file isn't readable, or no faces were
+    found."""
     fr = _load()
     if fr is None:
         return []
@@ -37,9 +39,16 @@ def get_face_encodings(image_path: str) -> List[np.ndarray]:
         locations = fr.face_locations(image)
         if not locations:
             return []
-        return fr.face_encodings(image, known_face_locations=locations)
+        encodings = fr.face_encodings(image, known_face_locations=locations)
+        return list(zip(encodings, locations))
     except Exception:
         return []
+
+
+def get_face_encodings(image_path: str) -> List[np.ndarray]:
+    """One 128-d encoding per face detected in the image. Empty if the library
+    isn't installed, the file isn't readable, or no faces were found."""
+    return [encoding for encoding, _bbox in get_faces_with_locations(image_path)]
 
 
 def best_face_match_distance(reference_encodings: List[np.ndarray],

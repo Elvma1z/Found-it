@@ -1,28 +1,34 @@
 import os
 import string
-import subprocess
 import platform
 import threading
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame, QFileDialog, QProgressBar, QSplitter,
-    QTextEdit, QInputDialog, QCheckBox
+    QInputDialog, QCheckBox, QTabWidget
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QColor, QIcon
+from PyQt5.QtGui import QFont
 from typing import List
 
 from found_it.fileindex.search import FileSearchEngine, SearchResult
+from found_it.gui.people_panel import PeopleGalleryWidget
 from found_it.utils.themes import get_palette, widget_qss, repolish
+from found_it.utils.os_open import open_file, open_containing_folder
 
 
-class FileSearchPanel(QWidget):
+class SearchTab(QWidget):
+    """Prompt or upload-an-image search across every indexed file - photos
+    of people, scenery, objects, or plain documents - by CLIP visual/text
+    similarity. Named people from the People tab are used automatically to
+    narrow a query that mentions one of them by name."""
+
     _image_search_done = pyqtSignal(list, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, engine: FileSearchEngine, parent=None):
         super().__init__(parent)
-        self.engine = FileSearchEngine()
+        self.engine = engine
         self.palette = get_palette("Indigo")
         self._setup_ui()
         self._setup_timer()
@@ -39,18 +45,20 @@ class FileSearchPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        title = QLabel("File Search")
+        title = QLabel("Search")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
         layout.addWidget(title)
 
-        desc = QLabel("Describe a file or image to find it on your PC")
+        desc = QLabel("Find people, scenery, items, or files on your PC - describe "
+                       "what you're looking for, or upload a picture of it")
         desc.setProperty("cls", "muted")
+        desc.setWordWrap(True)
         layout.addWidget(desc)
 
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("e.g. 'vacation photo with mountains'")
+        self.search_input.setPlaceholderText("e.g. 'vacation photo with mountains', or a person's name")
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
@@ -78,7 +86,7 @@ class FileSearchPanel(QWidget):
 
         full_pc_hint = QLabel("Searches every drive on this PC (skipping system/app folders like "
                                "Windows, Program Files, and AppData). Uncheck to scan only specific "
-                               "folders you pick below.")
+                               "folders you pick below. Photos found here also populate the People tab.")
         full_pc_hint.setProperty("cls", "hint")
         full_pc_hint.setWordWrap(True)
         layout.addWidget(full_pc_hint)
@@ -118,7 +126,8 @@ class FileSearchPanel(QWidget):
         layout.addLayout(folder_row)
 
         add_image_hint = QLabel('Or add one specific image and give it a name (e.g. "Passport") '
-                                 'to jump straight to it later by typing that name.')
+                                 'to jump straight to it later by typing that name. To name a '
+                                 'person instead, use the People tab.')
         add_image_hint.setProperty("cls", "hint")
         add_image_hint.setWordWrap(True)
         layout.addWidget(add_image_hint)
@@ -383,28 +392,13 @@ class FileSearchPanel(QWidget):
         row = self.results_list.currentRow()
         if row < 0 or row >= len(self._results):
             return
-
-        path = self._results[row].path
-        if platform.system() == "Windows":
-            os.startfile(path)
-        elif platform.system() == "Darwin":
-            subprocess.run(["open", path])
-        else:
-            subprocess.run(["xdg-open", path])
+        open_file(self._results[row].path)
 
     def _open_folder(self):
         row = self.results_list.currentRow()
         if row < 0 or row >= len(self._results):
             return
-
-        path = self._results[row].path
-        folder = os.path.dirname(path)
-        if platform.system() == "Windows":
-            subprocess.run(["explorer", folder])
-        elif platform.system() == "Darwin":
-            subprocess.run(["open", folder])
-        else:
-            subprocess.run(["xdg-open", folder])
+        open_containing_folder(self._results[row].path)
 
     def _poll_status(self):
         if self.engine.is_indexing():
@@ -412,3 +406,39 @@ class FileSearchPanel(QWidget):
             self.status_label.setText(
                 f"Indexing... {stats['indexed']}/{stats['total']} files"
             )
+
+
+class FileSearchPanel(QWidget):
+    """Search mode: a Search tab (prompt or upload-an-image, across photos,
+    scenery, items, and files generally) and a People tab (browse/name the
+    faces detected while indexing), sharing one underlying search engine
+    and index."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.engine = FileSearchEngine()
+        self.palette = get_palette("Indigo")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tabs = QTabWidget()
+        self.search_tab = SearchTab(self.engine)
+        self.people_tab = PeopleGalleryWidget(self.engine)
+        self.tabs.addTab(self.search_tab, "Search")
+        self.tabs.addTab(self.people_tab, "People")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs)
+
+        self.apply_theme(self.palette)
+
+    def _on_tab_changed(self, index):
+        if self.tabs.widget(index) is self.people_tab:
+            self.people_tab.refresh()
+
+    def apply_theme(self, palette: dict):
+        self.palette = palette
+        self.setStyleSheet(widget_qss(palette))
+        repolish(self)
+        self.search_tab.apply_theme(palette)
+        self.people_tab.apply_theme(palette)

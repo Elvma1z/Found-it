@@ -8,18 +8,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch  # noqa: F401
 
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 
 from found_it.gui.splash import create_splash_screen, splash_show_message
 from found_it.gui.main_window import MainWindow
 from found_it.utils.app_settings import load_app_settings
 from found_it.utils.themes import get_palette
+from found_it.utils.resources import ICON_PATH
 
 
 def main():
     app = QApplication(sys.argv)
 
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
 
     settings = load_app_settings()
     font = QFont(settings.font_family, 10)

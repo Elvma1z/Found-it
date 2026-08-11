@@ -25,7 +25,7 @@ RAINBOW_HUES = [
     ("Violet", 285),
 ]
 
-THEME_NAMES = [name for name, _ in RAINBOW_HUES] + ["White"]
+THEME_NAMES = [name for name, _ in RAINBOW_HUES] + ["White", "Dark"]
 
 
 def _hex(h, s, l):
@@ -65,8 +65,25 @@ def _white_palette():
     }
 
 
+def _dark_palette():
+    return {
+        "bg": "#1a1a1d",
+        "header": "#121214",
+        "panel": "#232326",
+        "selected": "#2d2d31",
+        "hover": "#39393e",
+        "border": "#303034",
+        "accent": "#6c6cf0",
+        "accent_hover": "#8080f5",
+        "text": "#e8e8ea",
+        "text_dim": "#a5a5ac",
+        "text_faint": "#707078",
+    }
+
+
 THEMES = {name: _palette_for_hue(hue) for name, hue in RAINBOW_HUES}
 THEMES["White"] = _white_palette()
+THEMES["Dark"] = _dark_palette()
 
 
 def get_palette(theme_name: str) -> dict:
@@ -138,4 +155,20 @@ def widget_qss(p: dict) -> str:
             max-height: 20px;
         }}
         QProgressBar::chunk {{ background-color: {p['accent']}; border-radius: 3px; }}
+        QTabWidget::pane {{
+            background-color: {p['bg']}; border: 1px solid {p['border']};
+            border-radius: 4px; top: -1px;
+        }}
+        QTabBar::tab {{
+            background-color: {p['panel']}; color: {p['text_dim']};
+            border: 1px solid {p['border']}; border-bottom: none;
+            border-top-left-radius: 4px; border-top-right-radius: 4px;
+            padding: 6px 16px; margin-right: 2px;
+        }}
+        QTabBar::tab:selected {{
+            background-color: {p['bg']}; color: {p['text']};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background-color: {p['hover']}; color: {p['text']};
+        }}
     """
