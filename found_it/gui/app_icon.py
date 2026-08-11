@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt, QRectF
 _DISC = QColor("#6955e7")
 _GLASS = QColor(255, 255, 255, 60)
 _RIM = QColor("#ffffff")
-_HANDLE = QColor("#ffffff")
+_HANDLE = QColor("#000000")
 _HIGHLIGHT = QColor(255, 255, 255, 160)
 
 
