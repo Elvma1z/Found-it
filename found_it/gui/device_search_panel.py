@@ -55,7 +55,7 @@ class DeviceSearchPanel(QWidget):
 
         conn_row.addStretch()
 
-        self.connect_btn = QPushButton("Connect")
+        self.connect_btn = QPushButton("🔗 Connect")
         self.connect_btn.setProperty("cls", "secondary")
         self.connect_btn.clicked.connect(lambda: self._do_connect())
         conn_row.addWidget(self.connect_btn)
@@ -74,12 +74,9 @@ class DeviceSearchPanel(QWidget):
         self.scan_btn.clicked.connect(self._start_scan)
         conn_row.addWidget(self.scan_btn)
 
-        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn = QPushButton("✕ Disconnect")
         self.disconnect_btn.setEnabled(False)
-        self.disconnect_btn.setProperty("cls", "secondary")
-        self.disconnect_btn.setStyleSheet("""
-            QPushButton:hover { background-color: #e53935; color: white; }
-        """)
+        self.disconnect_btn.setProperty("cls", "destructive")
         self.disconnect_btn.clicked.connect(self._disconnect)
         conn_row.addWidget(self.disconnect_btn)
 
@@ -108,7 +105,7 @@ class DeviceSearchPanel(QWidget):
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
-        self.search_btn = QPushButton("Search")
+        self.search_btn = QPushButton("🔍 Search")
         self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)

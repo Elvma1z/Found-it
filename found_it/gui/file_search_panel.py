@@ -62,12 +62,12 @@ class SearchTab(QWidget):
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
-        self.search_btn = QPushButton("Search")
+        self.search_btn = QPushButton("🔍 Search")
         self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
 
-        self.image_search_btn = QPushButton("Search by Image")
+        self.image_search_btn = QPushButton("🖼 Search by Image")
         self.image_search_btn.setProperty("cls", "secondary")
         self.image_search_btn.setToolTip("Pick a picture and find visually similar indexed images")
         self.image_search_btn.clicked.connect(self._search_by_image)
@@ -113,8 +113,8 @@ class SearchTab(QWidget):
         self.scan_btn.clicked.connect(self._start_scan)
         folder_row.addWidget(self.scan_btn)
 
-        self.cancel_scan_btn = QPushButton("Cancel")
-        self.cancel_scan_btn.setProperty("cls", "secondary")
+        self.cancel_scan_btn = QPushButton("✕ Cancel")
+        self.cancel_scan_btn.setProperty("cls", "destructive")
         self.cancel_scan_btn.setEnabled(False)
         self.cancel_scan_btn.clicked.connect(self._cancel_scan)
         folder_row.addWidget(self.cancel_scan_btn)
@@ -165,13 +165,13 @@ class SearchTab(QWidget):
         right_layout.addWidget(self.preview_label)
 
         btn_row = QHBoxLayout()
-        self.open_btn = QPushButton("Open File")
+        self.open_btn = QPushButton("📂 Open File")
         self.open_btn.setEnabled(False)
         self.open_btn.setProperty("cls", "secondary")
         self.open_btn.clicked.connect(self._open_file)
         btn_row.addWidget(self.open_btn)
 
-        self.open_dir_btn = QPushButton("Open Folder")
+        self.open_dir_btn = QPushButton("📁 Open Folder")
         self.open_dir_btn.setEnabled(False)
         self.open_dir_btn.setProperty("cls", "secondary")
         self.open_dir_btn.clicked.connect(self._open_folder)

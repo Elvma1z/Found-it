@@ -414,7 +414,7 @@ class SettingsPanel(QWidget):
         self.camera_status_label.setProperty("cls", "status")
         layout.addWidget(self.camera_status_label)
 
-        save_btn = QPushButton("Save Camera Settings")
+        save_btn = QPushButton("💾 Save Camera Settings")
         save_btn.setProperty("cls", "primary")
         save_btn.clicked.connect(self._on_save_camera_settings)
         layout.addWidget(save_btn)
@@ -485,7 +485,7 @@ class SettingsPanel(QWidget):
         self.appearance_status_label.setProperty("cls", "status")
         layout.addWidget(self.appearance_status_label)
 
-        save_btn = QPushButton("Save Appearance Settings")
+        save_btn = QPushButton("💾 Save Appearance Settings")
         save_btn.setProperty("cls", "primary")
         save_btn.clicked.connect(self._on_save_appearance_settings)
         layout.addWidget(save_btn)
@@ -583,13 +583,13 @@ class SettingsPanel(QWidget):
         sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
-        clear_history_btn = QPushButton("Clear Detection History")
-        clear_history_btn.setProperty("cls", "secondary")
+        clear_history_btn = QPushButton("🗑 Clear Detection History")
+        clear_history_btn.setProperty("cls", "destructive")
         clear_history_btn.clicked.connect(self._on_clear_history)
         layout.addWidget(clear_history_btn)
 
-        clear_snapshots_btn = QPushButton("Delete All Snapshots")
-        clear_snapshots_btn.setProperty("cls", "secondary")
+        clear_snapshots_btn = QPushButton("🗑 Delete All Snapshots")
+        clear_snapshots_btn.setProperty("cls", "destructive")
         clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
         layout.addWidget(clear_snapshots_btn)
 
@@ -609,12 +609,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(room_data_hint)
 
         room_data_row = QHBoxLayout()
-        export_rooms_btn = QPushButton("Export Room Data...")
+        export_rooms_btn = QPushButton("⬆ Export Room Data...")
         export_rooms_btn.setProperty("cls", "secondary")
         export_rooms_btn.clicked.connect(self._on_export_rooms)
         room_data_row.addWidget(export_rooms_btn)
 
-        import_rooms_btn = QPushButton("Import Room Data...")
+        import_rooms_btn = QPushButton("⬇ Import Room Data...")
         import_rooms_btn.setProperty("cls", "secondary")
         import_rooms_btn.clicked.connect(self._on_import_rooms)
         room_data_row.addWidget(import_rooms_btn)
@@ -759,7 +759,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.detected_list)
 
         detect_row = QHBoxLayout()
-        self.refresh_detected_btn = QPushButton("Refresh")
+        self.refresh_detected_btn = QPushButton("↻ Refresh")
         self.refresh_detected_btn.setProperty("cls", "secondary")
         self.refresh_detected_btn.clicked.connect(self._refresh_detected_devices)
         detect_row.addWidget(self.refresh_detected_btn)
@@ -768,7 +768,7 @@ class SettingsPanel(QWidget):
         self.nickname_input.setPlaceholderText("Nickname (e.g. My Phone)")
         detect_row.addWidget(self.nickname_input)
 
-        self.save_device_btn = QPushButton("Save Selected")
+        self.save_device_btn = QPushButton("💾 Save Selected")
         self.save_device_btn.setProperty("cls", "primary")
         self.save_device_btn.clicked.connect(self._on_save_device)
         detect_row.addWidget(self.save_device_btn)
@@ -785,13 +785,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.saved_list)
 
         saved_row = QHBoxLayout()
-        self.connect_saved_btn = QPushButton("Connect")
-        self.connect_saved_btn.setProperty("cls", "primary")
+        self.connect_saved_btn = QPushButton("🔗 Connect")
+        self.connect_saved_btn.setProperty("cls", "secondary")
         self.connect_saved_btn.clicked.connect(self._on_connect_saved)
         saved_row.addWidget(self.connect_saved_btn)
 
-        self.remove_saved_btn = QPushButton("Remove")
-        self.remove_saved_btn.setProperty("cls", "secondary")
+        self.remove_saved_btn = QPushButton("✕ Remove")
+        self.remove_saved_btn.setProperty("cls", "destructive")
         self.remove_saved_btn.clicked.connect(self._on_remove_saved)
         saved_row.addWidget(self.remove_saved_btn)
         layout.addLayout(saved_row)
@@ -893,13 +893,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.current_shortcut_label)
 
         find_row = QHBoxLayout()
-        find_shortcut_btn = QPushButton("Find Shortcut")
+        find_shortcut_btn = QPushButton("⌨ Find Shortcut")
         find_shortcut_btn.setProperty("cls", "primary")
         find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
         find_row.addWidget(find_shortcut_btn)
 
-        clear_shortcut_btn = QPushButton("Clear Shortcut")
-        clear_shortcut_btn.setProperty("cls", "secondary")
+        clear_shortcut_btn = QPushButton("✕ Clear Shortcut")
+        clear_shortcut_btn.setProperty("cls", "muted")
         clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
         find_row.addWidget(clear_shortcut_btn)
         find_row.addStretch()
@@ -1199,13 +1199,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.panel_customization_status_label)
 
         buttons_row = QHBoxLayout()
-        save_project_btn = QPushButton("Save Project")
+        save_project_btn = QPushButton("💾 Save Project")
         save_project_btn.setProperty("cls", "primary")
         save_project_btn.clicked.connect(self._on_save_project)
         buttons_row.addWidget(save_project_btn, 1)
 
-        clear_panels_btn = QPushButton("Clear Panels")
-        clear_panels_btn.setProperty("cls", "secondary")
+        clear_panels_btn = QPushButton("🗑 Clear Panels")
+        clear_panels_btn.setProperty("cls", "destructive")
         clear_panels_btn.clicked.connect(self._on_clear_panels)
         buttons_row.addWidget(clear_panels_btn)
         layout.addLayout(buttons_row)
