@@ -314,7 +314,6 @@ class SettingsPanel(QWidget):
 
         self.nav_list = QListWidget()
         self.nav_list.setFixedWidth(170)
-        self.nav_list.addItem(QListWidgetItem("Camera"))
         self.nav_list.addItem(QListWidgetItem("Appearance"))
         self.nav_list.addItem(QListWidgetItem("Data & Security"))
         self.nav_list.addItem(QListWidgetItem("Saved Devices"))
@@ -328,7 +327,6 @@ class SettingsPanel(QWidget):
         body.addWidget(sep)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_camera_page())
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_data_page())
         self.pages.addWidget(self._build_devices_page())
@@ -354,80 +352,13 @@ class SettingsPanel(QWidget):
         if row < 0:
             return
         self.pages.setCurrentIndex(row)
-        if row == 2:
+        if row == 1:
             self._refresh_data_stats()
-        elif row == 3:
+        elif row == 2:
             self._refresh_detected_devices()
             self._refresh_saved_list()
-        elif row == 4:
+        elif row == 3:
             self._refresh_customization_status()
-
-    # ---------------- Camera page ----------------
-
-    def _build_camera_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
-
-        layout.addWidget(self._page_title("Camera"))
-        desc = QLabel(
-            "Tune how detection runs across your cameras. To add, position, enable, "
-            "or rotate the physical cameras themselves, use the Room Setup tab."
-        )
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        conf_row = QHBoxLayout()
-        conf_row.addWidget(self._label("Detection confidence"))
-        self.confidence_input = QDoubleSpinBox()
-        self.confidence_input.setRange(0.05, 0.95)
-        self.confidence_input.setSingleStep(0.05)
-        self.confidence_input.setValue(self.app_settings.detection_confidence)
-        conf_row.addWidget(self.confidence_input)
-        conf_row.addStretch()
-        layout.addLayout(conf_row)
-        conf_hint = QLabel("Higher = fewer false positives, but may miss partially hidden items.")
-        conf_hint.setProperty("cls", "hint")
-        layout.addWidget(conf_hint)
-
-        skip_row = QHBoxLayout()
-        skip_row.addWidget(self._label("Detect every N frames"))
-        self.frame_skip_input = QSpinBox()
-        self.frame_skip_input.setRange(1, 15)
-        self.frame_skip_input.setValue(self.app_settings.detection_frame_skip)
-        skip_row.addWidget(self.frame_skip_input)
-        skip_row.addStretch()
-        layout.addLayout(skip_row)
-        skip_hint = QLabel("Higher = less CPU usage, slower to notice new items.")
-        skip_hint.setProperty("cls", "hint")
-        layout.addWidget(skip_hint)
-
-        self.dewarp_default_check = QCheckBox("Enable fisheye/360° dewarping by default")
-        self.dewarp_default_check.setChecked(self.app_settings.dewarp_default)
-        layout.addWidget(self.dewarp_default_check)
-
-        layout.addStretch()
-
-        self.camera_status_label = QLabel("")
-        self.camera_status_label.setProperty("cls", "status")
-        layout.addWidget(self.camera_status_label)
-
-        save_btn = QPushButton("💾 Save Camera Settings")
-        save_btn.setProperty("cls", "primary")
-        save_btn.clicked.connect(self._on_save_camera_settings)
-        layout.addWidget(save_btn)
-
-        return page
-
-    def _on_save_camera_settings(self):
-        self.app_settings.detection_confidence = self.confidence_input.value()
-        self.app_settings.detection_frame_skip = self.frame_skip_input.value()
-        self.app_settings.dewarp_default = self.dewarp_default_check.isChecked()
-        save_app_settings(self.app_settings)
-        self.camera_status_label.setText("Saved. Applies immediately.")
-        self.settings_updated.emit()
 
     # ---------------- Appearance page ----------------
 
@@ -1532,9 +1463,9 @@ class SettingsPanel(QWidget):
     def _split_room_setup_panel(self, panel: RoomSetupPanel) -> list:
         """(title_or_None, widget, size, restore_fn) per Room Setup's natural
         sections, instead of one solid block - the profile/dimensions/canvas
-        area, then each already-titled dock (Cameras, Zones / Furniture,
-        Drawers, Detected Objects) pulled out individually. Each restore_fn
-        puts its piece back into the dock area it came from."""
+        area, then each already-titled dock (Zones / Furniture, Drawers,
+        Detected Objects) pulled out individually. Each restore_fn puts its
+        piece back into the dock area it came from."""
         items = []
         # takeCentralWidget() (not centralWidget()) - it also clears
         # dock_host's own record of having a central widget. Reading the

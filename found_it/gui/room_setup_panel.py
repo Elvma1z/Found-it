@@ -16,7 +16,6 @@ from found_it.storage.models import RoomConfig
 from found_it.detection.item_mapper import ItemMapper
 from found_it.utils.themes import get_palette, widget_qss, repolish
 from found_it.utils.app_settings import load_app_settings, save_app_settings
-from found_it.camera.capture import CameraDiscovery
 
 # Real-world footprints (width_m, depth_m) for COCO labels worth auto-placing
 # as a zone when detected. Camera detections can't measure true size, so
@@ -444,17 +443,87 @@ class RoomCanvas(QWidget):
         super().keyPressEvent(event)
 
 
+class _CollapsibleDockTitle(QWidget):
+    """Custom title bar for a sidebar dock: click the arrow to collapse the
+    dock down to just this header, freeing up vertical space for its
+    siblings instead of every dock fighting over a fixed-size split (which
+    is what made their button rows overlap). Dragging/floating the dock
+    still works from the rest of the bar since only the arrow eats clicks."""
+
+    def __init__(self, title: str, dock: QDockWidget, dock_host: QMainWindow, parent=None):
+        super().__init__(parent)
+        self.dock = dock
+        self.dock_host = dock_host
+        self._expanded = True
+        self._last_expanded_height: Optional[int] = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(6)
+
+        self.toggle_btn = QPushButton("▾")
+        self.toggle_btn.setFlat(True)
+        self.toggle_btn.setFixedWidth(18)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self.toggle)
+        layout.addWidget(self.toggle_btn)
+
+        self.title_label = QLabel(title)
+        self.title_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        self.title_label.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.title_label)
+        layout.addStretch()
+
+    def mousePressEvent(self, event):
+        # Clicking the title text (not just the arrow) also toggles - only
+        # the empty stretch area is left free for the native drag handle.
+        if event.button() == Qt.LeftButton and self.title_label.geometry().contains(event.pos()):
+            self.toggle()
+            return
+        super().mousePressEvent(event)
+
+    def toggle(self):
+        # Constraining the dock's max height (not hiding its content widget)
+        # is deliberate - QMainWindow's dock layout recomputes the whole
+        # sidebar column's width off of each dock's *visible* size hint, so
+        # hiding a dock's content instead of just capping its height was
+        # collapsing the entire sidebar's width along with it.
+        self._expanded = not self._expanded
+        self.toggle_btn.setText("▾" if self._expanded else "▸")
+        header_h = self.sizeHint().height()
+
+        if self._expanded:
+            self.dock.setMaximumHeight(16777215)
+            # Removing the max height cap doesn't by itself make the dock
+            # grow back - the splitter just leaves it at its collapsed size
+            # until something asks for more, which is why reopening a
+            # section wasn't pushing the ones below it back down. Explicitly
+            # resizing it back to (roughly) what it was before forces that
+            # redistribution.
+            target = self._last_expanded_height or max(header_h * 6, 200)
+            self.dock_host.resizeDocks([self.dock], [target], Qt.Vertical)
+        else:
+            if self.dock.height() > header_h:
+                self._last_expanded_height = self.dock.height()
+            self.dock.setMaximumHeight(header_h)
+            self.dock_host.resizeDocks([self.dock], [header_h], Qt.Vertical)
+
+    def apply_theme(self, p: dict):
+        self.setStyleSheet(
+            f"background: {p['header']}; "
+            f"border-top: 1px solid {p['border']}; border-bottom: 1px solid {p['border']};"
+        )
+        self.title_label.setStyleSheet(f"color: {p['text']}; background: transparent;")
+        self.toggle_btn.setStyleSheet(f"""
+            QPushButton {{ color: {p['text']}; border: none; background: transparent; font-size: 11px; }}
+            QPushButton:hover {{ color: {p['accent']}; }}
+        """)
+
+
 class RoomSetupPanel(QWidget):
     """Lets the user size their room, lay out named zones/furniture, and rename detected objects."""
 
     room_updated = pyqtSignal()
-
-    # Emitted from the background scan thread - queued automatically onto
-    # this widget's own (GUI) thread since the connected slots below live
-    # here, so it's safe to touch widgets (including popping up a QMenu)
-    # from the handlers even though the scan itself runs elsewhere.
-    _camera_discovery_progress = pyqtSignal(str)
-    _camera_discovery_finished = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -463,14 +532,10 @@ class RoomSetupPanel(QWidget):
         self.zones: List[dict] = [dict(z) for z in self.profiles[0].zones]
         self.cameras: List[dict] = [dict(c) for c in self.profiles[0].cameras]
         self.palette = get_palette("Indigo")
-        self._camera_discovery = CameraDiscovery()
-        self._camera_discovery_progress.connect(self._on_camera_discovery_progress)
-        self._camera_discovery_finished.connect(self._on_camera_discovery_finished)
         self._setup_ui()
         self._refresh_profile_list()
         self._load_from_config()
         self._refresh_zone_list()
-        self._refresh_camera_list()
         self._refresh_object_list()
         self.apply_theme(self.palette)
         self._restore_layout()
@@ -491,7 +556,7 @@ class RoomSetupPanel(QWidget):
 
         self.dock_host.setStyleSheet(f"""
             QMainWindow {{ background-color: {p['bg']}; }}
-            QMainWindow::separator {{ background: {p['border']}; width: 4px; height: 4px; }}
+            QMainWindow::separator {{ background: {p['bg']}; width: 6px; height: 6px; }}
             QMainWindow::separator:hover {{ background: {p['accent']}; }}
             QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
             QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
@@ -510,13 +575,25 @@ class RoomSetupPanel(QWidget):
             QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
         """)
 
+        self.zones_title.apply_theme(p)
+        self.drawers_title.apply_theme(p)
+        self.objects_title.apply_theme(p)
+
+    # Bump this whenever the dock set changes (widgets added/removed, or a
+    # dock gets a custom title bar) - restoreState() rejects a saved layout
+    # whose version doesn't match instead of half-applying geometry that was
+    # computed for a different set of docks, which is what squeezed the
+    # sidebar down to a sliver after the Cameras dock was removed but the
+    # old saved layout (still describing 4 docks) got restored anyway.
+    _DOCK_LAYOUT_VERSION = 2
+
     def _restore_layout(self):
         state_b64 = load_app_settings().room_setup_layout
         if not state_b64:
             return
         try:
             state = QByteArray.fromBase64(state_b64.encode())
-            self.dock_host.restoreState(state)
+            self.dock_host.restoreState(state, self._DOCK_LAYOUT_VERSION)
         except Exception:
             pass
 
@@ -524,7 +601,7 @@ class RoomSetupPanel(QWidget):
         """Persist the current dock panel arrangement (size/position/floating
         state) so the Room Setup panel reopens where the user left it -
         called on app close, same as Room Tracker's own layout."""
-        state = self.dock_host.saveState()
+        state = self.dock_host.saveState(self._DOCK_LAYOUT_VERSION)
         settings = load_app_settings()
         settings.room_setup_layout = bytes(state.toBase64()).decode()
         save_app_settings(settings)
@@ -534,8 +611,9 @@ class RoomSetupPanel(QWidget):
 
     def reload_profiles(self):
         """Re-read room profiles from disk - for changes made outside this
-        panel (e.g. importing room data in Settings) so it doesn't keep
-        editing a stale in-memory copy and clobber the import on next Save."""
+        panel (e.g. importing room data in Settings, or camera add/rename/
+        remove from the Cameras tab) so it doesn't keep editing a stale
+        in-memory copy and clobber those changes on next Save."""
         self.profiles = load_room_profiles()
         if self._active_profile_index >= len(self.profiles):
             self._active_profile_index = 0
@@ -545,7 +623,6 @@ class RoomSetupPanel(QWidget):
         self._load_from_config()
         self._refresh_zone_list()
         self._refresh_drawer_list()
-        self._refresh_camera_list()
         self._refresh_object_list()
 
     def _setup_ui(self):
@@ -627,6 +704,15 @@ class RoomSetupPanel(QWidget):
         dims_row.addStretch()
         left_layout.addLayout(dims_row)
 
+        camera_hint = QLabel(
+            "Add, rename, or remove cameras from the Cameras tab. Once a camera's added, "
+            "drag its marker below to place it where it actually sits in the room - click "
+            "a marker to select it, then press Delete to take it out."
+        )
+        camera_hint.setProperty("cls", "hint")
+        camera_hint.setWordWrap(True)
+        left_layout.addWidget(camera_hint)
+
         self.canvas = RoomCanvas()
         self.canvas.zone_drawn.connect(self._on_zone_drawn)
         self.canvas.zone_selected.connect(self._on_zone_selected_in_canvas)
@@ -648,91 +734,6 @@ class RoomSetupPanel(QWidget):
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setWidget(left)
         self.dock_host.setCentralWidget(left_scroll)
-
-        # --- Cameras panel ---
-        cameras_widget = QWidget()
-        right_layout = QVBoxLayout(cameras_widget)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-        right_layout.setSpacing(10)
-
-        camera_add_row = QHBoxLayout()
-        camera_add_row.setSpacing(8)
-        self.camera_id_input = QSpinBox()
-        self.camera_id_input.setRange(0, 9)
-        self.camera_id_input.setPrefix("ID ")
-        camera_add_row.addWidget(self.camera_id_input)
-
-        self.camera_label_input = QLineEdit()
-        self.camera_label_input.setPlaceholderText("e.g. Desk Cam")
-        camera_add_row.addWidget(self.camera_label_input)
-
-        self.add_camera_btn = QPushButton("Add Camera")
-        self.add_camera_btn.setProperty("cls", "secondary")
-        self.add_camera_btn.clicked.connect(self._on_add_camera)
-        camera_add_row.addWidget(self.add_camera_btn)
-        right_layout.addLayout(camera_add_row)
-
-        camera_hint = QLabel("Drag a camera's marker on the room to place it where it actually sits. "
-                              "Click a marker to select it, then press Delete (or use Remove below) to "
-                              "take it out. Detected objects are positioned relative to that camera.")
-        camera_hint.setProperty("cls", "hint")
-        camera_hint.setWordWrap(True)
-        right_layout.addWidget(camera_hint)
-
-        discover_row = QHBoxLayout()
-        discover_row.setSpacing(8)
-        self.discover_cameras_btn = QPushButton("Discover Cameras")
-        self.discover_cameras_btn.setProperty("cls", "secondary")
-        self.discover_cameras_btn.clicked.connect(self._on_discover_cameras)
-        discover_row.addWidget(self.discover_cameras_btn)
-        right_layout.addLayout(discover_row)
-
-        discover_hint = QLabel("Scans this PC for cameras that aren't in the list yet, so you don't have "
-                                "to guess an ID. Already-added or currently in-use cameras are skipped.")
-        discover_hint.setProperty("cls", "hint")
-        discover_hint.setWordWrap(True)
-        right_layout.addWidget(discover_hint)
-
-        self.camera_list = QListWidget()
-        self.camera_list.setMinimumHeight(80)
-        self.camera_list.itemClicked.connect(self._on_camera_list_clicked)
-        self.camera_list.itemChanged.connect(self._on_camera_item_changed)
-        right_layout.addWidget(self.camera_list)
-
-        camera_edit_row = QHBoxLayout()
-        camera_edit_row.setSpacing(8)
-        self.camera_rename_input = QLineEdit()
-        self.camera_rename_input.setPlaceholderText("Rename selected camera")
-        camera_edit_row.addWidget(self.camera_rename_input)
-
-        self.rename_camera_btn = QPushButton("Rename")
-        self.rename_camera_btn.setProperty("cls", "primary")
-        self.rename_camera_btn.clicked.connect(self._on_rename_camera)
-        camera_edit_row.addWidget(self.rename_camera_btn)
-        right_layout.addLayout(camera_edit_row)
-
-        camera_action_row = QHBoxLayout()
-        camera_action_row.setSpacing(8)
-        self.toggle_360_btn = QPushButton("Toggle 360°")
-        self.toggle_360_btn.setProperty("cls", "secondary")
-        self.toggle_360_btn.clicked.connect(self._on_toggle_360)
-        camera_action_row.addWidget(self.toggle_360_btn)
-
-        self.remove_camera_btn = QPushButton("Remove")
-        self.remove_camera_btn.setProperty("cls", "secondary")
-        self.remove_camera_btn.clicked.connect(self._on_remove_camera)
-        camera_action_row.addWidget(self.remove_camera_btn)
-        right_layout.addLayout(camera_action_row)
-        right_layout.addStretch()
-
-        self.cameras_dock = QDockWidget("Cameras", self.dock_host)
-        self.cameras_dock.setObjectName("cameras_dock")
-        self.cameras_dock.setWidget(cameras_widget)
-        self.cameras_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.cameras_dock)
-        view_menu.addAction(self.cameras_dock.toggleViewAction())
 
         # --- Zones / Furniture panel ---
         zones_widget = QWidget()
@@ -800,12 +801,19 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(rename_row)
         right_layout.addStretch()
 
+        zones_scroll = QScrollArea()
+        zones_scroll.setWidgetResizable(True)
+        zones_scroll.setFrameShape(QFrame.NoFrame)
+        zones_scroll.setWidget(zones_widget)
+
         self.zones_dock = QDockWidget("Zones / Furniture", self.dock_host)
         self.zones_dock.setObjectName("zones_dock")
-        self.zones_dock.setWidget(zones_widget)
+        self.zones_dock.setWidget(zones_scroll)
         self.zones_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
         )
+        self.zones_title = _CollapsibleDockTitle("Zones / Furniture", self.zones_dock, self.dock_host)
+        self.zones_dock.setTitleBarWidget(self.zones_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.zones_dock)
         view_menu.addAction(self.zones_dock.toggleViewAction())
 
@@ -856,12 +864,19 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(drawer_rename_row)
         right_layout.addStretch()
 
+        drawers_scroll = QScrollArea()
+        drawers_scroll.setWidgetResizable(True)
+        drawers_scroll.setFrameShape(QFrame.NoFrame)
+        drawers_scroll.setWidget(drawers_widget)
+
         self.drawers_dock = QDockWidget("Drawers", self.dock_host)
         self.drawers_dock.setObjectName("drawers_dock")
-        self.drawers_dock.setWidget(drawers_widget)
+        self.drawers_dock.setWidget(drawers_scroll)
         self.drawers_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
         )
+        self.drawers_title = _CollapsibleDockTitle("Drawers", self.drawers_dock, self.dock_host)
+        self.drawers_dock.setTitleBarWidget(self.drawers_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.drawers_dock)
         view_menu.addAction(self.drawers_dock.toggleViewAction())
 
@@ -894,22 +909,29 @@ class RoomSetupPanel(QWidget):
         right_layout.addLayout(object_row)
         right_layout.addStretch()
 
+        objects_scroll = QScrollArea()
+        objects_scroll.setWidgetResizable(True)
+        objects_scroll.setFrameShape(QFrame.NoFrame)
+        objects_scroll.setWidget(objects_widget)
+
         self.objects_dock = QDockWidget("Detected Objects", self.dock_host)
         self.objects_dock.setObjectName("objects_dock")
-        self.objects_dock.setWidget(objects_widget)
+        self.objects_dock.setWidget(objects_scroll)
         self.objects_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
         )
+        self.objects_title = _CollapsibleDockTitle("Detected Objects", self.objects_dock, self.dock_host)
+        self.objects_dock.setTitleBarWidget(self.objects_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.objects_dock)
         view_menu.addAction(self.objects_dock.toggleViewAction())
 
-        # Cameras/Zones/Drawers/Detected Objects are independent dock
-        # panels - drag by their title bar to move or tab them together,
-        # drag an edge to resize, or float/close them (reopen via the
-        # "Panels" menu). Exposed as _room_docks so Panel Customization can
-        # still pull each one out to the sidebar individually.
+        # Zones/Drawers/Detected Objects are independent dock panels - drag
+        # by their title bar to move or tab them together, drag an edge to
+        # resize, or float/close them (reopen via the "Panels" menu).
+        # Exposed as _room_docks so Panel Customization can still pull each
+        # one out to the sidebar individually.
         self._room_docks: List[QDockWidget] = [
-            self.cameras_dock, self.zones_dock, self.drawers_dock, self.objects_dock,
+            self.zones_dock, self.drawers_dock, self.objects_dock,
         ]
 
         # "Save Room" stays outside the dock area, always reachable no
@@ -928,7 +950,6 @@ class RoomSetupPanel(QWidget):
         self._selected_drawer_index: Optional[int] = None
         self._selected_camera_index: Optional[int] = None
         self._selected_object_id: Optional[int] = None
-        self._updating_camera_list = False
 
     def _label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -969,11 +990,9 @@ class RoomSetupPanel(QWidget):
         self._selected_drawer_index = None
         self._selected_camera_index = None
         self.zone_rename_input.clear()
-        self.camera_rename_input.clear()
         self._load_from_config()
         self._refresh_zone_list()
         self._refresh_drawer_list()
-        self._refresh_camera_list()
         self._refresh_object_list()
         self.status_label.setText(f"Editing \"{profile.name}\".")
 
@@ -1280,118 +1299,8 @@ class RoomSetupPanel(QWidget):
         self.status_label.setText(f"Saved \"{profile.name}\".")
         self.room_updated.emit()
 
-    def _refresh_camera_list(self):
-        self._updating_camera_list = True
-        self.camera_list.clear()
-        for i, cam in enumerate(self.cameras):
-            tag = ", 360°" if cam.get("is_360") else ""
-            text = (f"{cam['label']}  (id {cam['id']}{tag}) "
-                    f"@ ({cam['x']:.1f}, {cam['y']:.1f})")
-            item = QListWidgetItem(text)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if cam.get("enabled") else Qt.Unchecked)
-            item.setData(Qt.UserRole, i)
-            self.camera_list.addItem(item)
-        self._updating_camera_list = False
-
-    def _add_camera(self, cam_id: int, label: str = ""):
-        if any(c["id"] == cam_id for c in self.cameras):
-            self.status_label.setText(f"Camera ID {cam_id} is already in the list.")
-            return
-        label = label.strip() or f"Camera {cam_id}"
-        self.cameras.append({
-            "id": cam_id,
-            "label": label,
-            "enabled": True,
-            "x": self.width_input.value() / 2.0,
-            "y": self.height_input.value() / 2.0,
-            "is_360": False,
-        })
-        self.canvas.set_cameras(self.cameras)
-        self._refresh_camera_list()
-        self.status_label.setText(f"Added \"{label}\". Drag it into place, then Save Room.")
-
-    def _on_add_camera(self):
-        self._add_camera(self.camera_id_input.value(), self.camera_label_input.text())
-        self.camera_label_input.clear()
-
-    def _on_discover_cameras(self):
-        if self._camera_discovery.is_scanning():
-            return
-        self.discover_cameras_btn.setEnabled(False)
-        self.status_label.setText("Scanning for cameras...")
-        exclude_ids = {c["id"] for c in self.cameras}
-        self._camera_discovery.start_scan(
-            max_index=10, exclude_ids=exclude_ids,
-            progress_callback=self._camera_discovery_progress.emit,
-            done_callback=self._camera_discovery_finished.emit,
-        )
-
-    def _on_camera_discovery_progress(self, message: str):
-        self.status_label.setText(message)
-
-    def _on_camera_discovery_finished(self, found: list):
-        self.discover_cameras_btn.setEnabled(True)
-        if not found:
-            self.status_label.setText(
-                "No additional cameras found. Already-added or in-use IDs are skipped."
-            )
-            return
-
-        menu = QMenu(self)
-        for info in found:
-            action = menu.addAction(f"Camera {info['id']} ({info['width']}x{info['height']})")
-            action.triggered.connect(lambda checked, cid=info["id"]: self._add_camera(cid))
-        self.status_label.setText(f"Found {len(found)} camera(s) - pick one to add.")
-        menu.exec_(self.discover_cameras_btn.mapToGlobal(self.discover_cameras_btn.rect().bottomLeft()))
-
-    def _on_camera_list_clicked(self, item: QListWidgetItem):
-        index = item.data(Qt.UserRole)
-        self._selected_camera_index = index
-        self.canvas.selected_camera_index = index
-        self.canvas.selected_index = None
-        self.canvas.update()
-        self.camera_rename_input.setText(self.cameras[index]["label"])
-
     def _on_camera_selected_in_canvas(self, index: int):
         self._selected_camera_index = index
-        self.camera_list.setCurrentRow(index)
-        self.camera_rename_input.setText(self.cameras[index]["label"])
-
-    def _on_camera_item_changed(self, item: QListWidgetItem):
-        if self._updating_camera_list:
-            return
-        index = item.data(Qt.UserRole)
-        if index is None:
-            return
-        self.cameras[index]["enabled"] = item.checkState() == Qt.Checked
-        self.canvas.set_cameras(self.cameras)
-        self.status_label.setText("Don't forget to Save Room.")
-
-    def _on_rename_camera(self):
-        if self._selected_camera_index is None:
-            self.status_label.setText("Select a camera to rename first.")
-            return
-        new_label = self.camera_rename_input.text().strip()
-        if not new_label:
-            return
-        self.cameras[self._selected_camera_index]["label"] = new_label
-        self.canvas.set_cameras(self.cameras)
-        self._refresh_camera_list()
-        self.camera_list.setCurrentRow(self._selected_camera_index)
-        self.status_label.setText(f"Renamed camera to \"{new_label}\". Don't forget to Save Room.")
-
-    def _on_toggle_360(self):
-        if self._selected_camera_index is None:
-            self.status_label.setText("Select a camera first.")
-            return
-        cam = self.cameras[self._selected_camera_index]
-        cam["is_360"] = not cam.get("is_360", False)
-        self.canvas.set_cameras(self.cameras)
-        self._refresh_camera_list()
-        self.camera_list.setCurrentRow(self._selected_camera_index)
-        state = "a 360°" if cam["is_360"] else "a standard"
-        self.status_label.setText(f"\"{cam['label']}\" is now {state} camera. Don't forget to Save Room.")
 
     def _on_remove_camera(self):
         if self._selected_camera_index is None:
@@ -1399,18 +1308,13 @@ class RoomSetupPanel(QWidget):
             return
         removed = self.cameras.pop(self._selected_camera_index)
         self._selected_camera_index = None
-        self.camera_rename_input.clear()
         self.canvas.set_cameras(self.cameras)
-        self._refresh_camera_list()
         self.status_label.setText(f"Removed \"{removed['label']}\". Don't forget to Save Room.")
 
     def _on_camera_moved(self, index: int, x: float, y: float):
         self.status_label.setText(f"{self.cameras[index]['label']} at ({x:.2f}m, {y:.2f}m)")
 
     def _on_camera_drag_finished(self):
-        self._refresh_camera_list()
-        if self._selected_camera_index is not None:
-            self.camera_list.setCurrentRow(self._selected_camera_index)
         self.status_label.setText(self.status_label.text() + " - don't forget to Save Room.")
 
     def _refresh_object_list(self):

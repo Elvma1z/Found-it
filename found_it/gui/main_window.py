@@ -67,6 +67,7 @@ from found_it.gui.file_search_panel import FileSearchPanel
 from found_it.gui.device_search_panel import DeviceSearchPanel
 from found_it.gui.room_setup_panel import RoomSetupPanel
 from found_it.gui.settings_panel import SettingsPanel
+from found_it.gui.camera_settings_panel import CameraSettingsPanel
 from found_it.gui.detection_worker import DetectionWorker
 
 
@@ -165,6 +166,12 @@ class MainWindow(QMainWindow):
         self._nav_tabs_insert_index = nav_layout.count()
         self._apply_nav_tab_order()
 
+        self.mode_cameras_btn = QPushButton("Cameras")
+        self.mode_cameras_btn.setCheckable(True)
+        self.mode_cameras_btn.clicked.connect(lambda: self._switch_mode("cameras"))
+        room_setup_index = nav_layout.indexOf(self.mode_room_setup_btn)
+        nav_layout.insertWidget(room_setup_index + 1, self.mode_cameras_btn)
+
         nav_layout.addStretch()
 
         self.settings_btn = QPushButton("⚙")
@@ -206,6 +213,8 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.room_updated.connect(self._on_room_updated)
         self.file_search_panel = FileSearchPanel()
         self.device_search_panel = DeviceSearchPanel()
+        self.camera_settings_panel = CameraSettingsPanel()
+        self.camera_settings_panel.settings_updated.connect(self._on_camera_settings_updated)
         self.settings_panel = SettingsPanel()
         self.settings_panel.settings_updated.connect(self._on_settings_updated)
         self.settings_panel.connect_device_requested.connect(self._on_connect_saved_device)
@@ -216,11 +225,13 @@ class MainWindow(QMainWindow):
         self.content_layout.addWidget(self.room_setup_panel)
         self.content_layout.addWidget(self.file_search_panel)
         self.content_layout.addWidget(self.device_search_panel)
+        self.content_layout.addWidget(self.camera_settings_panel)
         self.content_layout.addWidget(self.settings_panel)
 
         self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
+        self.camera_settings_panel.hide()
         self.settings_panel.hide()
 
         main_layout.addWidget(self.content_stack)
@@ -237,7 +248,8 @@ class MainWindow(QMainWindow):
         self._refresh_title_hotkey()
 
         nav_style = self._nav_button_style()
-        for btn in (self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn, self.mode_device_btn):
+        for btn in (self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn,
+                    self.mode_device_btn, self.mode_cameras_btn):
             btn.setStyleSheet(nav_style)
         self.settings_btn.setStyleSheet(self._nav_button_style("font-size: 16px; padding: 8px;"))
 
@@ -329,6 +341,7 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.apply_theme(p)
         self.file_search_panel.apply_theme(p)
         self.device_search_panel.apply_theme(p)
+        self.camera_settings_panel.apply_theme(p)
         self.settings_panel.apply_theme(p)
         for view in self.cam_views.values():
             view.apply_theme(p)
@@ -481,11 +494,13 @@ class MainWindow(QMainWindow):
         self.room_setup_panel.hide()
         self.file_search_panel.hide()
         self.device_search_panel.hide()
+        self.camera_settings_panel.hide()
         self.settings_panel.hide()
         self.mode_room_btn.setChecked(False)
         self.mode_room_setup_btn.setChecked(False)
         self.mode_file_btn.setChecked(False)
         self.mode_device_btn.setChecked(False)
+        self.mode_cameras_btn.setChecked(False)
         self.settings_btn.setChecked(False)
 
         if mode == "room":
@@ -500,6 +515,9 @@ class MainWindow(QMainWindow):
         elif mode == "device":
             self.device_search_panel.show()
             self.mode_device_btn.setChecked(True)
+        elif mode == "cameras":
+            self.camera_settings_panel.show()
+            self.mode_cameras_btn.setChecked(True)
         elif mode == "settings":
             self.settings_panel.show()
             self.settings_btn.setChecked(True)
@@ -616,6 +634,7 @@ class MainWindow(QMainWindow):
             "room_setup": self.room_setup_panel,
             "file": self.file_search_panel,
             "device": self.device_search_panel,
+            "cameras": self.camera_settings_panel,
             "settings": self.settings_panel,
         }
         for mode, panel in panels.items():
@@ -690,6 +709,17 @@ class MainWindow(QMainWindow):
             save_app_settings(self.app_settings)
         self.search_panel.set_room_names({p.id: p.name for p in self.room_profiles})
         self._start_all_room_cameras()
+        # Room Setup's own Save writes camera position/removal changes made
+        # by dragging on its canvas - keep the Cameras tab's in-memory copy
+        # from going stale and clobbering those on its next Save.
+        self.camera_settings_panel.reload_profiles()
+
+    def _on_camera_settings_updated(self):
+        self._on_settings_updated()
+        # The Cameras tab's own Save writes camera add/rename/toggle/remove
+        # changes - keep Room Setup's in-memory copy (and its canvas) from
+        # going stale and clobbering those on its next Save Room.
+        self.room_setup_panel.reload_profiles()
 
     def _on_rooms_imported(self):
         self._on_room_updated()
@@ -838,6 +868,7 @@ class MainWindow(QMainWindow):
                         existing["id"], det["zone_x"], det["zone_y"],
                         det["confidence"], zone_name
                     )
+                    self.db.deactivate_other_positions(det["label"], profile_id, existing["id"])
                 else:
                     # Only new items are worth the disk write - an item that's
                     # already tracked gets re-detected every cycle it sits
@@ -864,7 +895,8 @@ class MainWindow(QMainWindow):
                         zone_name=zone_name,
                         room_id=profile_id,
                     )
-                    self.db.insert_item(item)
+                    new_id = self.db.insert_item(item)
+                    self.db.deactivate_other_positions(det["label"], profile_id, new_id)
 
         self.statusBar().showMessage(
             f"Detected {total_detections} objects across {len(self.room_profiles)} room(s)"
@@ -913,8 +945,25 @@ class MainWindow(QMainWindow):
         )
 
     def _on_item_selected(self, item: dict):
-        if item.get("room_id") == self.active_room_id:
-            self.room_map.select_item(item.get("id"))
+        room_id = item.get("room_id")
+        if room_id is not None:
+            self._switch_display_room(room_id)
+
+        cam_id = item.get("camera_id")
+        view = self.cam_views.get(cam_id)
+        if view is None:
+            return
+
+        tab_index = self.cam_tabs.indexOf(view)
+        if tab_index != -1:
+            self.cam_tabs.setCurrentIndex(tab_index)
+
+        bbox = (
+            item.get("bbox_x1"), item.get("bbox_y1"),
+            item.get("bbox_x2"), item.get("bbox_y2"),
+        )
+        if None not in bbox:
+            view.set_highlight(bbox, item.get("label"))
 
     def _restore_room_tracker_layout(self, tracker: QMainWindow):
         state_b64 = self.app_settings.room_tracker_layout
