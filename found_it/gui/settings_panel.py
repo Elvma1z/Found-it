@@ -1420,8 +1420,8 @@ class SettingsPanel(QWidget):
         hidden/reparented widget can no longer be trusted to report its own
         size. title labels a specific piece within the category (e.g.
         "Search" inside the File Search tab) - leave it None for a widget
-        that already carries its own visible title (a dock, a
-        CollapsibleSection), so it doesn't get labeled twice. restore_fn puts
+        that already carries its own visible title (a dock), so it doesn't
+        get labeled twice. restore_fn puts
         the widget back where it came from when its thumbnail is dragged
         onto the preview."""
         insert_at = self.sidebar_content_layout.count() - 1  # keep the trailing stretch last
@@ -1519,9 +1519,11 @@ class SettingsPanel(QWidget):
         self._restore_screen_if_needed("room_setup")
         panel.dock_host.setCentralWidget(canvas_area)
 
-    def _restore_room_setup_section(self, panel: RoomSetupPanel, section: QWidget, idx: int):
+    def _restore_room_setup_dock(self, panel: RoomSetupPanel, dock: QDockWidget):
         self._restore_screen_if_needed("room_setup")
-        panel._right_container_layout.insertWidget(idx, section)
+        panel.dock_host.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.setFloating(False)
+        dock.show()
 
     def _restore_file_tab(self, panel: FileSearchPanel, widget: QWidget, label: str, idx: int):
         self._restore_screen_if_needed("file")
@@ -1530,10 +1532,9 @@ class SettingsPanel(QWidget):
     def _split_room_setup_panel(self, panel: RoomSetupPanel) -> list:
         """(title_or_None, widget, size, restore_fn) per Room Setup's natural
         sections, instead of one solid block - the profile/dimensions/canvas
-        area, then each already-titled CollapsibleSection (Cameras,
-        Zones / Furniture, Drawers, Detected Objects) pulled out
-        individually. Each restore_fn puts its piece back at the same spot
-        in the panel it came from."""
+        area, then each already-titled dock (Cameras, Zones / Furniture,
+        Drawers, Detected Objects) pulled out individually. Each restore_fn
+        puts its piece back into the dock area it came from."""
         items = []
         # takeCentralWidget() (not centralWidget()) - it also clears
         # dock_host's own record of having a central widget. Reading the
@@ -1548,15 +1549,16 @@ class SettingsPanel(QWidget):
                 "Room Setup", canvas_area, canvas_area.size(),
                 lambda p=panel, c=canvas_area: self._restore_room_setup_canvas(p, c),
             ))
-        for idx, section in enumerate(getattr(panel, "_collapsible_sections", [])):
-            size = section.size()
-            # Same reason as takeCentralWidget() above: tell the layout the
-            # section is gone before it gets ripped out, so re-inserting it
-            # later isn't fighting a stale QLayoutItem still pointing at it.
-            panel._right_container_layout.removeWidget(section)
+        for dock in getattr(panel, "_room_docks", []):
+            size = dock.size()
+            # removeDockWidget() unregisters it from dock_host's own dock
+            # manager before _wrap_as_thumbnail reparents it - otherwise a
+            # later addDockWidget() in restore fights a stale internal
+            # record of where it used to live.
+            panel.dock_host.removeDockWidget(dock)
             items.append((
-                None, section, size,
-                lambda p=panel, s=section, i=idx: self._restore_room_setup_section(p, s, i),
+                None, dock, size,
+                lambda p=panel, d=dock: self._restore_room_setup_dock(p, d),
             ))
         return items
 
