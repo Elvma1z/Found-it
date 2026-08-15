@@ -91,6 +91,8 @@ class MainWindow(QMainWindow):
         self.room_cameras = {}
         self.room_dewarpers = {}
         self.cam_views = {}
+        self._tracked_item_id = None
+        self._tracked_view = None
 
         self._setup_ui()
         self._setup_timers()
@@ -852,6 +854,11 @@ class MainWindow(QMainWindow):
             if mapper is None:
                 continue
 
+            # Re-anchor this room's camera->room mapping before computing
+            # positions this cycle, using whichever detections match
+            # furniture already placed on the room map.
+            mapper.calibrate_from_items(merged)
+
             for det in merged:
                 room_x, room_y = mapper.pixel_to_room(
                     det["zone_x"], det["zone_y"], det["camera_id"]
@@ -864,9 +871,10 @@ class MainWindow(QMainWindow):
                 )
 
                 if existing:
+                    bbox = (det["bbox_x1"], det["bbox_y1"], det["bbox_x2"], det["bbox_y2"])
                     self.db.update_item_position(
                         existing["id"], det["zone_x"], det["zone_y"],
-                        det["confidence"], zone_name
+                        det["confidence"], zone_name, bbox=bbox
                     )
                     self.db.deactivate_other_positions(det["label"], profile_id, existing["id"])
                 else:
@@ -901,6 +909,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Detected {total_detections} objects across {len(self.room_profiles)} room(s)"
         )
+        self._update_tracked_highlight()
 
     def _display_cycle(self):
         cams = self.room_cameras.get(self.active_room_id, {})
@@ -958,12 +967,50 @@ class MainWindow(QMainWindow):
         if tab_index != -1:
             self.cam_tabs.setCurrentIndex(tab_index)
 
+        if self._tracked_view is not None and self._tracked_view is not view:
+            self._tracked_view.clear_highlight()
+
         bbox = (
             item.get("bbox_x1"), item.get("bbox_y1"),
             item.get("bbox_x2"), item.get("bbox_y2"),
         )
         if None not in bbox:
-            view.set_highlight(bbox, item.get("label"))
+            view.set_highlight(bbox, item.get("label"), persistent=True)
+            self._tracked_item_id = item.get("id")
+            self._tracked_view = view
+
+    def _update_tracked_highlight(self):
+        """Keeps the highlight on a selected item following it live as new
+        detection cycles come in - including handing off to a different
+        camera's tab if it walks into another camera's view. Once it's no
+        longer active (moved out of every camera's view, or picked up),
+        stop chasing it but deliberately leave the box drawn at wherever it
+        was last seen instead of clearing it."""
+        if self._tracked_item_id is None:
+            return
+
+        item = self.db.get_item(self._tracked_item_id)
+        if item is None or not item.get("is_active") or item.get("room_id") != self.active_room_id:
+            self._tracked_item_id = None
+            return
+
+        bbox = (item.get("bbox_x1"), item.get("bbox_y1"), item.get("bbox_x2"), item.get("bbox_y2"))
+        if None in bbox:
+            return
+
+        view = self.cam_views.get(item.get("camera_id"))
+        if view is None:
+            return
+
+        if view is not self._tracked_view:
+            if self._tracked_view is not None:
+                self._tracked_view.clear_highlight()
+            tab_index = self.cam_tabs.indexOf(view)
+            if tab_index != -1:
+                self.cam_tabs.setCurrentIndex(tab_index)
+            self._tracked_view = view
+
+        view.set_highlight(bbox, item.get("label"), persistent=True)
 
     def _restore_room_tracker_layout(self, tracker: QMainWindow):
         state_b64 = self.app_settings.room_tracker_layout
