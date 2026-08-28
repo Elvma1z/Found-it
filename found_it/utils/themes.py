@@ -138,7 +138,7 @@ def widget_qss(p: dict) -> str:
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
         QPushButton[cls="primary"] {{
             background-color: {p['accent']}; color: white; border: none;
-            border-radius: 4px; padding: 8px 16px; font-weight: bold;
+            border-radius: 17px; padding: 8px 20px; font-weight: bold;
         }}
         QPushButton[cls="primary"]:hover {{ background-color: {p['accent_hover']}; }}
         QPushButton[cls="primary"]:disabled {{ background-color: {p['border']}; color: {p['text_faint']}; }}
@@ -149,6 +149,20 @@ def widget_qss(p: dict) -> str:
         QPushButton[cls="secondary"]:hover {{ background-color: {p['hover']}; color: {p['text']}; }}
         QPushButton[cls="secondary"]:checked {{ background-color: {p['accent']}; color: white; }}
         QPushButton[cls="secondary"]:disabled {{ color: {p['text_faint']}; }}
+        QPushButton[cls="destructive"] {{
+            background-color: transparent; color: #e57373;
+            border: 1px solid #e57373; border-radius: 4px; padding: 6px 14px; font-size: 12px;
+        }}
+        QPushButton[cls="destructive"]:hover {{ background-color: #e53935; color: white; border-color: #e53935; }}
+        QPushButton[cls="destructive"]:checked {{ background-color: #e53935; color: white; border-color: #e53935; }}
+        QPushButton[cls="destructive"]:disabled {{ color: {p['text_faint']}; border-color: {p['border']}; }}
+        QPushButton[cls="muted"] {{
+            background-color: transparent; color: {p['text_dim']};
+            border: 1px solid transparent; border-radius: 4px; padding: 6px 14px; font-size: 12px;
+        }}
+        QPushButton[cls="muted"]:hover {{ background-color: {p['panel']}; color: {p['text']}; border-color: {p['border']}; }}
+        QPushButton[cls="muted"]:checked {{ background-color: {p['selected']}; color: {p['text']}; border-color: {p['border']}; }}
+        QPushButton[cls="muted"]:disabled {{ color: {p['text_faint']}; }}
         QProgressBar {{
             background-color: {p['bg']}; border: 1px solid {p['border']};
             border-radius: 4px; text-align: center; color: {p['text_dim']};

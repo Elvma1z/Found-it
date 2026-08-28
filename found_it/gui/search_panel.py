@@ -110,10 +110,10 @@ class SearchPanel(QWidget):
             last_seen = item.get("last_seen", "")[:16]
 
             text = f"{label}  ({cam_label}, {conf:.0%})"
+            if zone_name:
+                text += f"\n  {zone_name[0].upper()}{zone_name[1:]}"
             if room_name:
                 text += f"\n  Room: {room_name}"
-            if zone_name:
-                text += f"\n  {zone_name.capitalize()}"
             if last_seen:
                 text += f"\n  Last seen: {last_seen}"
 
@@ -133,16 +133,18 @@ class SearchPanel(QWidget):
         first = item.get("first_seen", "")[:16]
         last = item.get("last_seen", "")[:16]
 
+        location = f"{zone_name[0].upper()}{zone_name[1:]}"
+
         details = (
-            f"Item: {label}\n"
-            f"Confidence: {conf:.1%}\n"
-            f"Room: {room_name}\n"
-            f"Location: {zone_name.capitalize()}\n"
-            f"Camera: {cam_label}\n"
-            f"Position: ({zx:.2f}, {zy:.2f})\n"
-            f"First seen: {first}\n"
+            f"<b style='font-size: 13pt'>{label}: {location}</b><br>"
+            f"Room: {room_name}<br>"
+            f"Confidence: {conf:.1%}<br>"
+            f"Camera: {cam_label}<br>"
+            f"Position: ({zx:.2f}, {zy:.2f})<br>"
+            f"First seen: {first}<br>"
             f"Last seen: {last}"
         )
+        self.detail_label.setTextFormat(Qt.RichText)
         self.detail_label.setText(details)
 
     def show_all_items(self, items: List[dict]):

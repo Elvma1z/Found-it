@@ -20,6 +20,7 @@ from found_it.utils.saved_devices import load_saved_devices, save_saved_devices
 from found_it.utils.room_profiles import load_room_profiles, save_room_profiles, profile_from_dict, profiles_to_list
 from found_it.utils.themes import THEME_NAMES, get_palette, widget_qss, repolish
 from found_it.device.adb_handler import ADBHandler
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.gui.splash import create_notice_splash
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.room_map import RoomMap
@@ -136,13 +137,29 @@ class SettingsPanel(QWidget):
         self._detected_devices = []
         self._selected_saved_index: Optional[int] = None
         self.palette = get_palette("Indigo")
+        self._icon_registry = []
         self._setup_ui()
         self.apply_theme(self.palette)
+
+    def _icon_btn(self, widget: QPushButton, name: str, color_kind: str) -> QPushButton:
+        """Registers a button for a Lucide icon that gets recolored on every
+        apply_theme() call (color_kind: "white", "destructive", or "dim")."""
+        widget.setIconSize(ICON_SIZE)
+        self._icon_registry.append((widget, name, color_kind))
+        return widget
 
     def apply_theme(self, palette: dict):
         self.palette = palette
         p = palette
         self.setStyleSheet(widget_qss(palette))
+
+        icon_colors = {
+            "white": "#ffffff", "destructive": "#e57373",
+            "dim": p["text_dim"], "faint": p["text_faint"],
+        }
+        for widget, name, color_kind in self._icon_registry:
+            widget.setIcon(get_icon(name, icon_colors[color_kind]))
+
         self.nav_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {p['header']};
@@ -314,7 +331,6 @@ class SettingsPanel(QWidget):
 
         self.nav_list = QListWidget()
         self.nav_list.setFixedWidth(170)
-        self.nav_list.addItem(QListWidgetItem("Camera"))
         self.nav_list.addItem(QListWidgetItem("Appearance"))
         self.nav_list.addItem(QListWidgetItem("Data & Security"))
         self.nav_list.addItem(QListWidgetItem("Saved Devices"))
@@ -328,7 +344,6 @@ class SettingsPanel(QWidget):
         body.addWidget(sep)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_camera_page())
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_data_page())
         self.pages.addWidget(self._build_devices_page())
@@ -354,80 +369,13 @@ class SettingsPanel(QWidget):
         if row < 0:
             return
         self.pages.setCurrentIndex(row)
-        if row == 2:
+        if row == 1:
             self._refresh_data_stats()
-        elif row == 3:
+        elif row == 2:
             self._refresh_detected_devices()
             self._refresh_saved_list()
-        elif row == 4:
+        elif row == 3:
             self._refresh_customization_status()
-
-    # ---------------- Camera page ----------------
-
-    def _build_camera_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
-
-        layout.addWidget(self._page_title("Camera"))
-        desc = QLabel(
-            "Tune how detection runs across your cameras. To add, position, enable, "
-            "or rotate the physical cameras themselves, use the Room Setup tab."
-        )
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        conf_row = QHBoxLayout()
-        conf_row.addWidget(self._label("Detection confidence"))
-        self.confidence_input = QDoubleSpinBox()
-        self.confidence_input.setRange(0.05, 0.95)
-        self.confidence_input.setSingleStep(0.05)
-        self.confidence_input.setValue(self.app_settings.detection_confidence)
-        conf_row.addWidget(self.confidence_input)
-        conf_row.addStretch()
-        layout.addLayout(conf_row)
-        conf_hint = QLabel("Higher = fewer false positives, but may miss partially hidden items.")
-        conf_hint.setProperty("cls", "hint")
-        layout.addWidget(conf_hint)
-
-        skip_row = QHBoxLayout()
-        skip_row.addWidget(self._label("Detect every N frames"))
-        self.frame_skip_input = QSpinBox()
-        self.frame_skip_input.setRange(1, 15)
-        self.frame_skip_input.setValue(self.app_settings.detection_frame_skip)
-        skip_row.addWidget(self.frame_skip_input)
-        skip_row.addStretch()
-        layout.addLayout(skip_row)
-        skip_hint = QLabel("Higher = less CPU usage, slower to notice new items.")
-        skip_hint.setProperty("cls", "hint")
-        layout.addWidget(skip_hint)
-
-        self.dewarp_default_check = QCheckBox("Enable fisheye/360° dewarping by default")
-        self.dewarp_default_check.setChecked(self.app_settings.dewarp_default)
-        layout.addWidget(self.dewarp_default_check)
-
-        layout.addStretch()
-
-        self.camera_status_label = QLabel("")
-        self.camera_status_label.setProperty("cls", "status")
-        layout.addWidget(self.camera_status_label)
-
-        save_btn = QPushButton("Save Camera Settings")
-        save_btn.setProperty("cls", "primary")
-        save_btn.clicked.connect(self._on_save_camera_settings)
-        layout.addWidget(save_btn)
-
-        return page
-
-    def _on_save_camera_settings(self):
-        self.app_settings.detection_confidence = self.confidence_input.value()
-        self.app_settings.detection_frame_skip = self.frame_skip_input.value()
-        self.app_settings.dewarp_default = self.dewarp_default_check.isChecked()
-        save_app_settings(self.app_settings)
-        self.camera_status_label.setText("Saved. Applies immediately.")
-        self.settings_updated.emit()
 
     # ---------------- Appearance page ----------------
 
@@ -485,7 +433,7 @@ class SettingsPanel(QWidget):
         self.appearance_status_label.setProperty("cls", "status")
         layout.addWidget(self.appearance_status_label)
 
-        save_btn = QPushButton("Save Appearance Settings")
+        save_btn = self._icon_btn(QPushButton(" Save Appearance Settings"), "save", "white")
         save_btn.setProperty("cls", "primary")
         save_btn.clicked.connect(self._on_save_appearance_settings)
         layout.addWidget(save_btn)
@@ -583,13 +531,21 @@ class SettingsPanel(QWidget):
         sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
-        clear_history_btn = QPushButton("Clear Detection History")
-        clear_history_btn.setProperty("cls", "secondary")
+        clear_history_btn = self._icon_btn(QPushButton(" Clear Detection History"), "trash-2", "destructive")
+        clear_history_btn.setProperty("cls", "destructive")
         clear_history_btn.clicked.connect(self._on_clear_history)
         layout.addWidget(clear_history_btn)
 
-        clear_snapshots_btn = QPushButton("Delete All Snapshots")
-        clear_snapshots_btn.setProperty("cls", "secondary")
+        prune_snapshots_btn = self._icon_btn(QPushButton(" Remove Orphaned Snapshots"), "trash-2", "dim")
+        prune_snapshots_btn.setToolTip(
+            "Delete snapshot images that no tracked item refers to any more. "
+            "Snapshots still in use are kept."
+        )
+        prune_snapshots_btn.clicked.connect(self._on_prune_snapshots)
+        layout.addWidget(prune_snapshots_btn)
+
+        clear_snapshots_btn = self._icon_btn(QPushButton(" Delete All Snapshots"), "trash-2", "destructive")
+        clear_snapshots_btn.setProperty("cls", "destructive")
         clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
         layout.addWidget(clear_snapshots_btn)
 
@@ -609,12 +565,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(room_data_hint)
 
         room_data_row = QHBoxLayout()
-        export_rooms_btn = QPushButton("Export Room Data...")
+        export_rooms_btn = self._icon_btn(QPushButton(" Export Room Data..."), "upload", "dim")
         export_rooms_btn.setProperty("cls", "secondary")
         export_rooms_btn.clicked.connect(self._on_export_rooms)
         room_data_row.addWidget(export_rooms_btn)
 
-        import_rooms_btn = QPushButton("Import Room Data...")
+        import_rooms_btn = self._icon_btn(QPushButton(" Import Room Data..."), "download", "dim")
         import_rooms_btn.setProperty("cls", "secondary")
         import_rooms_btn.clicked.connect(self._on_import_rooms)
         room_data_row.addWidget(import_rooms_btn)
@@ -657,10 +613,21 @@ class SettingsPanel(QWidget):
         if confirm != QMessageBox.Yes:
             return
         db = Database()
-        db.clear_all_items()
+        # The rows own their snapshot images; deleting the rows without the
+        # files left the images stranded on disk with nothing referencing them.
+        orphaned = db.clear_all_items()
         db.close()
+        removed = 0
+        for path in orphaned:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
         self._refresh_data_stats()
-        self.data_status_label.setText("Detection history cleared.")
+        self.data_status_label.setText(
+            f"Detection history cleared ({removed} snapshot(s) removed)."
+        )
 
     def _on_clear_snapshots(self):
         confirm = QMessageBox.question(
@@ -679,8 +646,42 @@ class SettingsPanel(QWidget):
                         deleted += 1
                     except OSError:
                         pass
+        # Every stored path now points at a file that's gone, so drop the
+        # references rather than leaving rows advertising missing images.
+        db = Database()
+        db.clear_snapshot_references()
+        db.close()
         self._refresh_data_stats()
         self.data_status_label.setText(f"Deleted {deleted} snapshot(s).")
+
+    def _on_prune_snapshots(self):
+        """Delete snapshot images no row references any more - the backlog
+        left behind by the churn bug, which nothing will ever display."""
+        db = Database()
+        referenced = db.get_referenced_snapshots()
+        db.close()
+
+        referenced = {os.path.normcase(os.path.abspath(p)) for p in referenced}
+        deleted = 0
+        freed = 0
+        if SNAPSHOTS_DIR.exists():
+            for f in SNAPSHOTS_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                if os.path.normcase(os.path.abspath(str(f))) in referenced:
+                    continue
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    freed += size
+                except OSError:
+                    pass
+
+        self._refresh_data_stats()
+        self.data_status_label.setText(
+            f"Removed {deleted} orphaned snapshot(s), freeing {freed / (1024 * 1024):.1f} MB."
+        )
 
     def _on_export_rooms(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -759,7 +760,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.detected_list)
 
         detect_row = QHBoxLayout()
-        self.refresh_detected_btn = QPushButton("Refresh")
+        self.refresh_detected_btn = self._icon_btn(QPushButton(" Refresh"), "refresh-cw", "dim")
         self.refresh_detected_btn.setProperty("cls", "secondary")
         self.refresh_detected_btn.clicked.connect(self._refresh_detected_devices)
         detect_row.addWidget(self.refresh_detected_btn)
@@ -768,7 +769,7 @@ class SettingsPanel(QWidget):
         self.nickname_input.setPlaceholderText("Nickname (e.g. My Phone)")
         detect_row.addWidget(self.nickname_input)
 
-        self.save_device_btn = QPushButton("Save Selected")
+        self.save_device_btn = self._icon_btn(QPushButton(" Save Selected"), "save", "white")
         self.save_device_btn.setProperty("cls", "primary")
         self.save_device_btn.clicked.connect(self._on_save_device)
         detect_row.addWidget(self.save_device_btn)
@@ -785,13 +786,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.saved_list)
 
         saved_row = QHBoxLayout()
-        self.connect_saved_btn = QPushButton("Connect")
-        self.connect_saved_btn.setProperty("cls", "primary")
+        self.connect_saved_btn = self._icon_btn(QPushButton(" Connect"), "link", "dim")
+        self.connect_saved_btn.setProperty("cls", "secondary")
         self.connect_saved_btn.clicked.connect(self._on_connect_saved)
         saved_row.addWidget(self.connect_saved_btn)
 
-        self.remove_saved_btn = QPushButton("Remove")
-        self.remove_saved_btn.setProperty("cls", "secondary")
+        self.remove_saved_btn = self._icon_btn(QPushButton(" Remove"), "x", "destructive")
+        self.remove_saved_btn.setProperty("cls", "destructive")
         self.remove_saved_btn.clicked.connect(self._on_remove_saved)
         saved_row.addWidget(self.remove_saved_btn)
         layout.addLayout(saved_row)
@@ -893,13 +894,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.current_shortcut_label)
 
         find_row = QHBoxLayout()
-        find_shortcut_btn = QPushButton("Find Shortcut")
+        find_shortcut_btn = self._icon_btn(QPushButton(" Find Shortcut"), "keyboard", "white")
         find_shortcut_btn.setProperty("cls", "primary")
         find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
         find_row.addWidget(find_shortcut_btn)
 
-        clear_shortcut_btn = QPushButton("Clear Shortcut")
-        clear_shortcut_btn.setProperty("cls", "secondary")
+        clear_shortcut_btn = self._icon_btn(QPushButton(" Clear Shortcut"), "x", "dim")
+        clear_shortcut_btn.setProperty("cls", "muted")
         clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
         find_row.addWidget(clear_shortcut_btn)
         find_row.addStretch()
@@ -1014,7 +1015,7 @@ class SettingsPanel(QWidget):
 
         nav_row.addStretch()
 
-        self.preview_settings_btn = QPushButton("⚙")
+        self.preview_settings_btn = self._icon_btn(QPushButton(), "settings", "faint")
         self.preview_settings_btn.setCheckable(True)
         self.preview_settings_btn.setChecked(True)
         self.preview_settings_btn.setEnabled(False)
@@ -1023,17 +1024,17 @@ class SettingsPanel(QWidget):
 
         nav_row.addSpacing(12)
 
-        self.preview_min_btn = QPushButton("─")
+        self.preview_min_btn = self._icon_btn(QPushButton(), "minus", "faint")
         self.preview_min_btn.setFixedSize(44, 48)
         self.preview_min_btn.setEnabled(False)
         nav_row.addWidget(self.preview_min_btn)
 
-        self.preview_max_btn = QPushButton("☐")
+        self.preview_max_btn = self._icon_btn(QPushButton(), "square", "faint")
         self.preview_max_btn.setFixedSize(44, 48)
         self.preview_max_btn.setEnabled(False)
         nav_row.addWidget(self.preview_max_btn)
 
-        self.preview_close_btn = QPushButton("✕")
+        self.preview_close_btn = self._icon_btn(QPushButton(), "x", "faint")
         self.preview_close_btn.setFixedSize(44, 48)
         self.preview_close_btn.setEnabled(False)
         nav_row.addWidget(self.preview_close_btn)
@@ -1199,13 +1200,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.panel_customization_status_label)
 
         buttons_row = QHBoxLayout()
-        save_project_btn = QPushButton("Save Project")
+        save_project_btn = self._icon_btn(QPushButton(" Save Project"), "save", "white")
         save_project_btn.setProperty("cls", "primary")
         save_project_btn.clicked.connect(self._on_save_project)
         buttons_row.addWidget(save_project_btn, 1)
 
-        clear_panels_btn = QPushButton("Clear Panels")
-        clear_panels_btn.setProperty("cls", "secondary")
+        clear_panels_btn = self._icon_btn(QPushButton(" Clear Panels"), "trash-2", "destructive")
+        clear_panels_btn.setProperty("cls", "destructive")
         clear_panels_btn.clicked.connect(self._on_clear_panels)
         buttons_row.addWidget(clear_panels_btn)
         layout.addLayout(buttons_row)
@@ -1420,8 +1421,8 @@ class SettingsPanel(QWidget):
         hidden/reparented widget can no longer be trusted to report its own
         size. title labels a specific piece within the category (e.g.
         "Search" inside the File Search tab) - leave it None for a widget
-        that already carries its own visible title (a dock, a
-        CollapsibleSection), so it doesn't get labeled twice. restore_fn puts
+        that already carries its own visible title (a dock), so it doesn't
+        get labeled twice. restore_fn puts
         the widget back where it came from when its thumbnail is dragged
         onto the preview."""
         insert_at = self.sidebar_content_layout.count() - 1  # keep the trailing stretch last
@@ -1519,9 +1520,11 @@ class SettingsPanel(QWidget):
         self._restore_screen_if_needed("room_setup")
         panel.dock_host.setCentralWidget(canvas_area)
 
-    def _restore_room_setup_section(self, panel: RoomSetupPanel, section: QWidget, idx: int):
+    def _restore_room_setup_dock(self, panel: RoomSetupPanel, dock: QDockWidget):
         self._restore_screen_if_needed("room_setup")
-        panel._right_container_layout.insertWidget(idx, section)
+        panel.dock_host.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.setFloating(False)
+        dock.show()
 
     def _restore_file_tab(self, panel: FileSearchPanel, widget: QWidget, label: str, idx: int):
         self._restore_screen_if_needed("file")
@@ -1530,10 +1533,9 @@ class SettingsPanel(QWidget):
     def _split_room_setup_panel(self, panel: RoomSetupPanel) -> list:
         """(title_or_None, widget, size, restore_fn) per Room Setup's natural
         sections, instead of one solid block - the profile/dimensions/canvas
-        area, then each already-titled CollapsibleSection (Cameras,
-        Zones / Furniture, Drawers, Detected Objects) pulled out
-        individually. Each restore_fn puts its piece back at the same spot
-        in the panel it came from."""
+        area, then each already-titled dock (Zones / Furniture, Drawers,
+        Detected Objects) pulled out individually. Each restore_fn puts its
+        piece back into the dock area it came from."""
         items = []
         # takeCentralWidget() (not centralWidget()) - it also clears
         # dock_host's own record of having a central widget. Reading the
@@ -1548,15 +1550,16 @@ class SettingsPanel(QWidget):
                 "Room Setup", canvas_area, canvas_area.size(),
                 lambda p=panel, c=canvas_area: self._restore_room_setup_canvas(p, c),
             ))
-        for idx, section in enumerate(getattr(panel, "_collapsible_sections", [])):
-            size = section.size()
-            # Same reason as takeCentralWidget() above: tell the layout the
-            # section is gone before it gets ripped out, so re-inserting it
-            # later isn't fighting a stale QLayoutItem still pointing at it.
-            panel._right_container_layout.removeWidget(section)
+        for dock in getattr(panel, "_room_docks", []):
+            size = dock.size()
+            # removeDockWidget() unregisters it from dock_host's own dock
+            # manager before _wrap_as_thumbnail reparents it - otherwise a
+            # later addDockWidget() in restore fights a stale internal
+            # record of where it used to live.
+            panel.dock_host.removeDockWidget(dock)
             items.append((
-                None, section, size,
-                lambda p=panel, s=section, i=idx: self._restore_room_setup_section(p, s, i),
+                None, dock, size,
+                lambda p=panel, d=dock: self._restore_room_setup_dock(p, d),
             ))
         return items
 

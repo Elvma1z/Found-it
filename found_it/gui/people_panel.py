@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont
 
 from found_it.fileindex.search import FileSearchEngine, SearchResult
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.utils.themes import get_palette, widget_qss, repolish
 from found_it.utils.os_open import open_file, open_containing_folder
 
@@ -38,6 +39,10 @@ class PeopleGalleryWidget(QWidget):
     def apply_theme(self, palette: dict):
         self.palette = palette
         self.setStyleSheet(widget_qss(palette))
+        self.add_person_btn.setIcon(get_icon("plus", palette["text_dim"]))
+        self.add_file_btn.setIcon(get_icon("plus", palette["text_dim"]))
+        self.open_btn.setIcon(get_icon("file", palette["text_dim"]))
+        self.open_dir_btn.setIcon(get_icon("folder-open", palette["text_dim"]))
         repolish(self)
 
     def _setup_ui(self):
@@ -128,13 +133,15 @@ class PeopleGalleryWidget(QWidget):
         self.delete_btn.clicked.connect(self._delete_selected_person)
         rename_row.addWidget(self.delete_btn)
 
-        self.add_person_btn = QPushButton("+ Add Person")
+        self.add_person_btn = QPushButton(" Add Person")
+        self.add_person_btn.setIconSize(ICON_SIZE)
         self.add_person_btn.setProperty("cls", "secondary")
         self.add_person_btn.setToolTip("Pick a photo of someone to tag them as a new person")
         self.add_person_btn.clicked.connect(self._add_person)
         rename_row.addWidget(self.add_person_btn)
 
-        self.add_file_btn = QPushButton("+ Add File")
+        self.add_file_btn = QPushButton(" Add File")
+        self.add_file_btn.setIconSize(ICON_SIZE)
         self.add_file_btn.setProperty("cls", "secondary")
         self.add_file_btn.setEnabled(False)
         self.add_file_btn.setToolTip("Pick another photo of the selected person to add to their gallery")
@@ -153,13 +160,15 @@ class PeopleGalleryWidget(QWidget):
         right_layout.addWidget(self.photos_list)
 
         btn_row = QHBoxLayout()
-        self.open_btn = QPushButton("Open File")
+        self.open_btn = QPushButton(" Open File")
+        self.open_btn.setIconSize(ICON_SIZE)
         self.open_btn.setEnabled(False)
         self.open_btn.setProperty("cls", "secondary")
         self.open_btn.clicked.connect(self._open_photo)
         btn_row.addWidget(self.open_btn)
 
-        self.open_dir_btn = QPushButton("Open Folder")
+        self.open_dir_btn = QPushButton(" Open Folder")
+        self.open_dir_btn.setIconSize(ICON_SIZE)
         self.open_dir_btn.setEnabled(False)
         self.open_dir_btn.setProperty("cls", "secondary")
         self.open_dir_btn.clicked.connect(self._open_photo_folder)

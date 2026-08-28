@@ -11,6 +11,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
 from found_it.device.device_scanner import DeviceScanner, DeviceSearchResult
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.utils.themes import get_palette, widget_qss, repolish
 
 
@@ -26,6 +27,10 @@ class DeviceSearchPanel(QWidget):
     def apply_theme(self, palette: dict):
         self.palette = palette
         self.setStyleSheet(widget_qss(palette))
+        self.connect_btn.setIcon(get_icon("link", palette["text_dim"]))
+        self.disconnect_btn.setIcon(get_icon("unlink", "#e57373"))
+        self.search_btn.setIcon(get_icon("search", "#ffffff"))
+        self._show_results()
         repolish(self)
 
     def _setup_ui(self):
@@ -55,7 +60,8 @@ class DeviceSearchPanel(QWidget):
 
         conn_row.addStretch()
 
-        self.connect_btn = QPushButton("Connect")
+        self.connect_btn = QPushButton(" Connect")
+        self.connect_btn.setIconSize(ICON_SIZE)
         self.connect_btn.setProperty("cls", "secondary")
         self.connect_btn.clicked.connect(lambda: self._do_connect())
         conn_row.addWidget(self.connect_btn)
@@ -74,12 +80,10 @@ class DeviceSearchPanel(QWidget):
         self.scan_btn.clicked.connect(self._start_scan)
         conn_row.addWidget(self.scan_btn)
 
-        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn = QPushButton(" Disconnect")
+        self.disconnect_btn.setIconSize(ICON_SIZE)
         self.disconnect_btn.setEnabled(False)
-        self.disconnect_btn.setProperty("cls", "secondary")
-        self.disconnect_btn.setStyleSheet("""
-            QPushButton:hover { background-color: #e53935; color: white; }
-        """)
+        self.disconnect_btn.setProperty("cls", "destructive")
         self.disconnect_btn.clicked.connect(self._disconnect)
         conn_row.addWidget(self.disconnect_btn)
 
@@ -108,7 +112,8 @@ class DeviceSearchPanel(QWidget):
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
-        self.search_btn = QPushButton("Search")
+        self.search_btn = QPushButton(" Search")
+        self.search_btn.setIconSize(ICON_SIZE)
         self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
@@ -235,20 +240,20 @@ class DeviceSearchPanel(QWidget):
         self.results_label.setText(f"Results ({len(self._results)})")
 
         for i, result in enumerate(self._results):
-            icon = {"image": "[IMG]", "code": "[CODE]", "text": "[TXT]"}.get(
-                result.file_type, "[?]"
+            icon_name = {"image": "image", "code": "code", "text": "file-text"}.get(
+                result.file_type, "file"
             )
             size_kb = result.size_bytes / 1024
             size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
             score_str = f"{result.score:.0%}"
 
             text = (
-                f"{icon} {result.name}\n"
+                f"{result.name}\n"
                 f"  {result.path}\n"
                 f"  {size_str} | Match: {score_str}"
             )
 
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(get_icon(icon_name, self.palette["text_dim"]), text)
             item.setData(Qt.UserRole, i)
             self.results_list.addItem(item)
 
