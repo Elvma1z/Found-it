@@ -1,14 +1,18 @@
+import math
 import uuid
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
     QInputDialog, QMessageBox, QMenu, QScrollArea,
-    QMainWindow, QDockWidget
+    QMainWindow, QDockWidget, QSizePolicy
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QByteArray
-from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush
+from PyQt5.QtCore import Qt, pyqtSignal, QByteArray, QPointF, QRectF
+from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush, QPolygonF
 from typing import List, Optional, Tuple
+
+from found_it.gui.room_map import _facing_wedge_path
+from found_it.gui.icons import get_icon, ICON_SIZE
 
 from found_it.utils.room_profiles import load_room_profiles, save_room_profiles
 from found_it.storage.database import Database
@@ -34,6 +38,98 @@ FURNITURE_SIZES_M = {
     "potted plant": (0.4, 0.4),
 }
 
+FURNITURE_TYPES = [
+    "Other", "Bed", "Dresser", "Closet", "Nightstand", "Desk", "Shelf",
+    "Cabinet", "Couch", "Chair", "Table", "TV", "Refrigerator",
+]
+
+# A piece of furniture with no height is just a flat rectangle, and guessing
+# one would draw the user a room that isn't theirs - so height starts unset
+# (0.0) and the 3D view refuses to open until every piece has a real one.
+DEFAULT_WALL_HEIGHT_M = 2.5
+CAMERA_MOUNT_HEIGHT_M = 2.0
+
+
+# Room Setup is shown in imperial, but every stored measurement stays in
+# metres - the detector, the item mapper and the Room Tracker map all work in
+# them, and so do already-saved room profiles. Feet and inches exist purely at
+# the display/input boundary, converted by the helpers below.
+M_PER_FT = 0.3048
+M_PER_IN = 0.0254
+
+
+def m_to_ft(metres: float) -> float:
+    return metres / M_PER_FT
+
+
+def ft_to_m(feet: float) -> float:
+    return feet * M_PER_FT
+
+
+def m_to_in(metres: float) -> float:
+    return metres / M_PER_IN
+
+
+def in_to_m(inches: float) -> float:
+    return inches * M_PER_IN
+
+
+def format_ft_in(metres: float) -> str:
+    """Render a length as feet and inches - 0.85m -> 2' 9\".
+
+    Heights read naturally this way where decimal feet ("2.79 ft") do not,
+    so it is used for every height the user reads back.
+    """
+    total_in = int(round(metres / M_PER_IN))
+    feet, inches = divmod(total_in, 12)
+    if feet and inches:
+        return f"{feet}' {inches}\""
+    if feet:
+        return f"{feet}'"
+    return f"{inches}\""
+
+
+def zone_height(zone: dict) -> float:
+    """A zone's height off the floor in metres, or 0.0 when it hasn't been
+    set yet. Note this is not the room's own height_m, which is its depth
+    (the y axis of the floor plan) - these live on different objects."""
+    try:
+        return float(zone.get("height_m") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def zones_missing_height(zones: List[dict]) -> List[str]:
+    """Names of the furniture still without a height, in list order."""
+    return [z.get("name", "Unnamed") for z in zones if zone_height(z) <= 0.0]
+
+
+def _iso_point(x: float, y: float, z: float, yaw: float, elev: float) -> Tuple[float, float, float]:
+    """Project a room-space point (metres, z = up) for the 3D view.
+
+    Returns (u, v, depth): u/v are unscaled screen offsets, and depth grows
+    towards the viewer so it doubles as the painter's-algorithm sort key.
+    """
+    rx = x * math.cos(yaw) - y * math.sin(yaw)
+    ry = x * math.sin(yaw) + y * math.cos(yaw)
+    return rx, ry * math.sin(elev) - z * math.cos(elev), ry
+
+
+def _faces_viewer(nx: float, ny: float, yaw: float) -> bool:
+    """Whether an outward face normal (nx, ny) points towards the viewer -
+    used to draw only the sides of a box that can actually be seen."""
+    return nx * math.sin(yaw) + ny * math.cos(yaw) > 0
+
+
+def _shade(color: QColor, factor: float, alpha: int = 255) -> QColor:
+    """Darken a face colour so a box's top and sides read as lit from
+    different angles instead of as one flat silhouette."""
+    shaded = QColor(int(color.red() * factor), int(color.green() * factor),
+                    int(color.blue() * factor))
+    shaded.setAlpha(alpha)
+    return shaded
+
+
 CAMERA_COLORS = {
     0: QColor(255, 100, 100),
     1: QColor(100, 100, 255),
@@ -43,6 +139,17 @@ CAMERA_FALLBACK_COLORS = [
     QColor(255, 180, 60), QColor(200, 100, 255), QColor(255, 100, 200),
     QColor(120, 220, 255), QColor(180, 255, 100),
 ]
+
+
+def _guess_furniture_type(name: str) -> str:
+    """Best-effort default for a new zone's Type field, matched against the
+    known FURNITURE_TYPES by name (e.g. "Dresser" -> "Dresser") so the
+    settings panel doesn't just show "Other" for every obviously-named item."""
+    lowered = name.strip().lower()
+    for t in FURNITURE_TYPES:
+        if t.lower() == lowered:
+            return t
+    return "Other"
 
 
 def _camera_color(cam_id: int) -> QColor:
@@ -128,6 +235,8 @@ class RoomCanvas(QWidget):
     CAMERA_HIT_RADIUS_PX = 12
     CORNER_HANDLE_RADIUS_PX = 7
     MIN_ZONE_SIZE_M = 0.1
+    MIN_ELEV_DEG = 8.0
+    MAX_ELEV_DEG = 85.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -152,6 +261,54 @@ class RoomCanvas(QWidget):
         self._resize_start_drawers: Optional[List[dict]] = None
         self._padding = 30
         self.palette = get_palette("Indigo")
+        # 3D view: off by default, and view-only while on (see set_view_3d).
+        self.view_3d = False
+        self.yaw_deg = 30.0
+        self.elev_deg = 35.0
+        self._orbit_last: Optional[Tuple[int, int]] = None
+
+    def set_view_3d(self, enabled: bool):
+        """Switch between the flat floor plan and the extruded 3D room.
+
+        Turning it on cancels any in-progress zone drawing: once the room is
+        tilted a click no longer maps to a single point on the floor, so
+        laying out furniture stays a 2D job.
+        """
+        self.view_3d = enabled
+        self._orbit_last = None
+        if enabled:
+            self.draw_mode = False
+            self._drag_start = None
+            self._drag_current = None
+        self.update()
+
+    def _wall_height(self) -> float:
+        """Room height for the 3D shell - tall enough to clear the tallest
+        piece of furniture in it, so nothing pokes through the walls."""
+        tallest = max((zone_height(z) for z in self.zones), default=0.0)
+        return max(DEFAULT_WALL_HEIGHT_M, tallest + 0.3)
+
+    def _iso_transform(self) -> Tuple[float, float, float, float, float]:
+        """Scale/offset that fits the whole room box on screen at the current
+        orbit angles, plus those angles in radians."""
+        yaw = math.radians(self.yaw_deg)
+        elev = math.radians(self.elev_deg)
+        wall = self._wall_height()
+        us, vs = [], []
+        for x in (0.0, self.room_width):
+            for y in (0.0, self.room_height):
+                for z in (0.0, wall):
+                    u, v, _ = _iso_point(x, y, z, yaw, elev)
+                    us.append(u)
+                    vs.append(v)
+        span_u = (max(us) - min(us)) or 1.0
+        span_v = (max(vs) - min(vs)) or 1.0
+        draw_w, draw_h = self._draw_rect()
+        draw_w, draw_h = max(draw_w, 1), max(draw_h, 1)
+        scale = min(draw_w / span_u, draw_h / span_v)
+        ox = self._padding + (draw_w - span_u * scale) / 2.0 - min(us) * scale
+        oy = self._padding + (draw_h - span_v * scale) / 2.0 - min(vs) * scale
+        return scale, ox, oy, yaw, elev
 
     def apply_theme(self, palette: dict):
         self.palette = palette
@@ -215,6 +372,10 @@ class RoomCanvas(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        if self.view_3d:
+            self._orbit_last = (event.x(), event.y())
+            self.setFocus()
+            return
         if self.draw_mode:
             self._drag_start = self._px_to_m(event.x(), event.y())
             self._drag_current = self._drag_start
@@ -262,6 +423,16 @@ class RoomCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
+        if self.view_3d:
+            if self._orbit_last is None:
+                return
+            last_x, last_y = self._orbit_last
+            self.yaw_deg = (self.yaw_deg + (event.x() - last_x) * 0.5) % 360.0
+            self.elev_deg = max(self.MIN_ELEV_DEG, min(
+                self.MAX_ELEV_DEG, self.elev_deg - (event.y() - last_y) * 0.35))
+            self._orbit_last = (event.x(), event.y())
+            self.update()
+            return
         if self._resizing_zone_index is not None:
             mx, my = self._px_to_m(event.x(), event.y())
             ox1, oy1, ox2, oy2 = self._resize_start_bounds
@@ -309,6 +480,9 @@ class RoomCanvas(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        if self.view_3d:
+            self._orbit_last = None
+            return
         if self._resizing_zone_index is not None:
             self._resizing_zone_index = None
             self._resize_start_bounds = None
@@ -337,10 +511,16 @@ class RoomCanvas(QWidget):
                 self.zone_drawn.emit(x1, y1, x2, y2)
 
     def paintEvent(self, event):
-        p = self.palette
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        if self.view_3d:
+            self._paint_3d(painter)
+        else:
+            self._paint_2d(painter)
+        painter.end()
 
+    def _paint_2d(self, painter):
+        p = self.palette
         _, ox, oy, room_px_w, room_px_h = self._scale_and_offset()
         ox, oy, room_px_w, room_px_h = int(ox), int(oy), int(room_px_w), int(room_px_h)
 
@@ -403,6 +583,15 @@ class RoomCanvas(QWidget):
             is_selected = i == self.selected_camera_index
             radius = 10 if is_dragging else 8
 
+            if cam.get("is_180"):
+                # Shows what this camera can (and can't) actually see, so
+                # its coverage gap is obvious while placing it - not just
+                # discovered later on the Room Tracker map.
+                wedge_r = min(room_px_w, room_px_h) // 2 - 10
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 70), 1, Qt.DotLine))
+                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 25)))
+                painter.drawPath(_facing_wedge_path(cx, cy, wedge_r, cam.get("facing_deg", 0.0)))
+
             if is_selected:
                 ring_r = radius + 5
                 painter.setPen(QPen(accent_hover, 2, Qt.DashLine))
@@ -418,7 +607,157 @@ class RoomCanvas(QWidget):
             painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
             painter.drawText(cx + 12, cy + 4, cam.get("label", f"Camera {cam.get('id', 0)}"))
 
-        painter.end()
+    def _paint_3d(self, painter):
+        """The same room drawn as a box, with every piece of furniture stood
+        up to the height the user gave it. Faces are depth-sorted back to
+        front (painter's algorithm) so nearer furniture covers what is behind
+        it - that overlap is what makes the layout read as a room instead of
+        a plan."""
+        p = self.palette
+        scale, ox, oy, yaw, elev = self._iso_transform()
+        wall = self._wall_height()
+        room_w, room_h = self.room_width, self.room_height
+
+        def pt(x: float, y: float, z: float = 0.0) -> QPointF:
+            u, v, _ = _iso_point(x, y, z, yaw, elev)
+            return QPointF(ox + u * scale, oy + v * scale)
+
+        def poly(*corners) -> QPolygonF:
+            return QPolygonF([pt(*c) for c in corners])
+
+        def depth_of(x: float, y: float) -> float:
+            return x * math.sin(yaw) + y * math.cos(yaw)
+
+        border = QColor(p["border"])
+        accent = QColor(p["accent"])
+        accent_hover = QColor(p["accent_hover"])
+
+        # Only the walls facing away from the viewer, so the room reads as a
+        # box being looked into rather than a sealed crate.
+        for nx, ny, corners in (
+            (-1, 0, ((0, 0, 0), (0, room_h, 0), (0, room_h, wall), (0, 0, wall))),
+            (1, 0, ((room_w, 0, 0), (room_w, room_h, 0), (room_w, room_h, wall), (room_w, 0, wall))),
+            (0, -1, ((0, 0, 0), (room_w, 0, 0), (room_w, 0, wall), (0, 0, wall))),
+            (0, 1, ((0, room_h, 0), (room_w, room_h, 0), (room_w, room_h, wall), (0, room_h, wall))),
+        ):
+            if _faces_viewer(nx, ny, yaw):
+                continue
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(QBrush(_shade(QColor(p["panel"]), 1.0, 110)))
+            painter.drawPolygon(poly(*corners))
+
+        painter.setPen(QPen(border, 2))
+        painter.setBrush(QBrush(QColor(p["bg"])))
+        painter.drawPolygon(poly((0, 0, 0), (room_w, 0, 0), (room_w, room_h, 0), (0, room_h, 0)))
+
+        painter.setPen(QPen(border, 1, Qt.DashLine))
+        for i in range(1, 4):
+            painter.drawLine(pt(room_w * i / 4, 0), pt(room_w * i / 4, room_h))
+            painter.drawLine(pt(0, room_h * i / 4), pt(room_w, room_h * i / 4))
+
+        # Camera coverage lies flat on the floor, so it goes down before any
+        # furniture is stood up on top of it.
+        for cam in self.cameras:
+            if not cam.get("is_180"):
+                continue
+            color = _camera_color(cam.get("id", 0))
+            cam_x, cam_y = cam.get("x", 0.0), cam.get("y", 0.0)
+            radius_m = min(room_w, room_h) / 2.0
+            facing = math.radians(cam.get("facing_deg", 0.0))
+            corners = [(cam_x, cam_y, 0.0)]
+            for i in range(25):
+                ang = facing - math.pi / 2 + math.pi * i / 24
+                corners.append((cam_x + radius_m * math.cos(ang),
+                                cam_y + radius_m * math.sin(ang), 0.0))
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 70), 1, Qt.DotLine))
+            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 22)))
+            painter.drawPolygon(poly(*corners))
+
+        def draw_zone(index: int):
+            zone = self.zones[index]
+            x1, y1, x2, y2 = zone["x1"], zone["y1"], zone["x2"], zone["y2"]
+            zh = zone_height(zone)
+            selected = index == self.selected_index
+            base = accent_hover if selected else accent
+
+            for nx, ny, corners in (
+                (-1, 0, ((x1, y1, 0), (x1, y2, 0), (x1, y2, zh), (x1, y1, zh))),
+                (1, 0, ((x2, y1, 0), (x2, y2, 0), (x2, y2, zh), (x2, y1, zh))),
+                (0, -1, ((x1, y1, 0), (x2, y1, 0), (x2, y1, zh), (x1, y1, zh))),
+                (0, 1, ((x1, y2, 0), (x2, y2, 0), (x2, y2, zh), (x1, y2, zh))),
+            ):
+                if not _faces_viewer(nx, ny, yaw):
+                    continue
+                painter.setPen(QPen(_shade(base, 0.45), 1))
+                painter.setBrush(QBrush(_shade(base, 0.72 if nx else 0.52, 235)))
+                painter.drawPolygon(poly(*corners))
+
+            painter.setPen(QPen(base.lighter(130) if selected else base, 2 if selected else 1))
+            painter.setBrush(QBrush(_shade(base, 1.0, 215)))
+            painter.drawPolygon(poly((x1, y1, zh), (x2, y1, zh), (x2, y2, zh), (x1, y2, zh)))
+
+            for drawer in zone.get("drawers", []):
+                painter.setPen(QPen(QColor(255, 210, 90, 200), 1, Qt.DotLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPolygon(poly(
+                    (drawer["x1"], drawer["y1"], zh), (drawer["x2"], drawer["y1"], zh),
+                    (drawer["x2"], drawer["y2"], zh), (drawer["x1"], drawer["y2"], zh),
+                ))
+
+            center = pt((x1 + x2) / 2.0, (y1 + y2) / 2.0, zh)
+            painter.setPen(QPen(QColor(p["text"]), 1))
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.drawText(
+                QRectF(center.x() - 75, center.y() - 9, 150, 18), Qt.AlignCenter,
+                f"{zone.get('name', 'Zone')} - {format_ft_in(zh)}",
+            )
+
+        def draw_camera(index: int):
+            cam = self.cameras[index]
+            cam_x, cam_y = cam.get("x", 0.0), cam.get("y", 0.0)
+            color = _camera_color(cam.get("id", 0))
+            alpha = 255 if cam.get("enabled") else 90
+            mount = min(CAMERA_MOUNT_HEIGHT_M, wall)
+            base_pt, top_pt = pt(cam_x, cam_y, 0.0), pt(cam_x, cam_y, mount)
+
+            # A stem down to the floor - without it a marker floating at
+            # mount height gives no clue where in the room it actually sits.
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(),
+                                       min(alpha, 140)), 1, Qt.DotLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(base_pt, top_pt)
+
+            if index == self.selected_camera_index:
+                painter.setPen(QPen(accent_hover, 2, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(top_pt, 13.0, 13.0)
+
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), alpha), 2))
+            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), min(alpha, 130))))
+            painter.drawEllipse(top_pt, 8.0, 8.0)
+
+            text_color = QColor(p["text"])
+            text_color.setAlpha(alpha)
+            painter.setPen(QPen(text_color, 1))
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.drawText(int(top_pt.x()) + 12, int(top_pt.y()) + 4,
+                             cam.get("label", f"Camera {cam.get('id', 0)}"))
+
+        drawables = [
+            (depth_of((z["x1"] + z["x2"]) / 2.0, (z["y1"] + z["y2"]) / 2.0), draw_zone, i)
+            for i, z in enumerate(self.zones)
+        ] + [
+            (depth_of(c.get("x", 0.0), c.get("y", 0.0)), draw_camera, i)
+            for i, c in enumerate(self.cameras)
+        ]
+        drawables.sort(key=lambda entry: entry[0])
+        for _, draw, index in drawables:
+            draw(index)
+
+        painter.setPen(QPen(QColor(p["text_faint"]), 1))
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(8, self.height() - 8,
+                         "3D view - drag to orbit. Switch back to 2D to move or resize anything.")
 
     def keyPressEvent(self, event):
         if self.selected_camera_index is not None and self.selected_camera_index < len(self.cameras):
@@ -443,25 +782,34 @@ class RoomCanvas(QWidget):
         super().keyPressEvent(event)
 
 
+# Room Setup's panels are pinned the same way Room Tracker's are: no Movable,
+# no Floatable. Collapsing (the arrow in each title bar) and hiding via the
+# View menu still work - neither moves a panel out of its slot. Rearranging
+# happens in Settings > Customization.
+LOCKED_DOCK_FEATURES = QDockWidget.DockWidgetClosable
+
+
 class _CollapsibleDockTitle(QWidget):
     """Custom title bar for a sidebar dock: click the arrow to collapse the
     dock down to just this header, freeing up vertical space for its
     siblings instead of every dock fighting over a fixed-size split (which
-    is what made their button rows overlap). Dragging/floating the dock
-    still works from the rest of the bar since only the arrow eats clicks."""
+    is what made their button rows overlap). The rest of the bar is inert -
+    docks are locked in place (LOCKED_DOCK_FEATURES) outside Customization."""
 
     def __init__(self, title: str, dock: QDockWidget, dock_host: QMainWindow, parent=None):
         super().__init__(parent)
         self.dock = dock
         self.dock_host = dock_host
         self._expanded = True
+        self._palette = {}
         self._last_expanded_height: Optional[int] = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(6)
 
-        self.toggle_btn = QPushButton("▾")
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setIconSize(ICON_SIZE)
         self.toggle_btn.setFlat(True)
         self.toggle_btn.setFixedWidth(18)
         self.toggle_btn.setCursor(Qt.PointingHandCursor)
@@ -489,7 +837,10 @@ class _CollapsibleDockTitle(QWidget):
         # hiding a dock's content instead of just capping its height was
         # collapsing the entire sidebar's width along with it.
         self._expanded = not self._expanded
-        self.toggle_btn.setText("▾" if self._expanded else "▸")
+        self.toggle_btn.setIcon(get_icon(
+            "chevron-down" if self._expanded else "chevron-right",
+            self._palette.get("text", "#e0e0e0"),
+        ))
         header_h = self.sizeHint().height()
 
         if self._expanded:
@@ -509,15 +860,116 @@ class _CollapsibleDockTitle(QWidget):
             self.dock_host.resizeDocks([self.dock], [header_h], Qt.Vertical)
 
     def apply_theme(self, p: dict):
+        self._palette = p
         self.setStyleSheet(
             f"background: {p['header']}; "
             f"border-top: 1px solid {p['border']}; border-bottom: 1px solid {p['border']};"
         )
         self.title_label.setStyleSheet(f"color: {p['text']}; background: transparent;")
-        self.toggle_btn.setStyleSheet(f"""
-            QPushButton {{ color: {p['text']}; border: none; background: transparent; font-size: 11px; }}
-            QPushButton:hover {{ color: {p['accent']}; }}
+        self.toggle_btn.setStyleSheet("""
+            QPushButton { border: none; background: transparent; }
         """)
+        self.toggle_btn.setIcon(get_icon("chevron-down" if self._expanded else "chevron-right", p["text"]))
+
+
+class _HeightRequiredSplash(QWidget):
+    """Error splash covering the whole Room Setup tab when 3D is switched on
+    while some furniture still has no height.
+
+    Deliberately not a QMessageBox: it names every piece that is missing one,
+    so the fix is a list to work through rather than a dialog that has to be
+    dismissed before the user can go hunting for which piece was the problem.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hide()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(30, 30, 30, 30)
+        outer.addStretch()
+
+        row = QHBoxLayout()
+        row.addStretch()
+
+        self.card = QFrame()
+        self.card.setObjectName("splash_card")
+        self.card.setMinimumWidth(380)
+        self.card.setMaximumWidth(560)
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(22, 20, 22, 18)
+        card_layout.setSpacing(10)
+
+        self.title_label = QLabel("Can't switch to 3D yet")
+        self.title_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
+        card_layout.addWidget(self.title_label)
+
+        self.body_label = QLabel()
+        self.body_label.setWordWrap(True)
+        card_layout.addWidget(self.body_label)
+
+        self.list_label = QLabel()
+        self.list_label.setWordWrap(True)
+        card_layout.addWidget(self.list_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.dismiss_btn = QPushButton("Got it")
+        self.dismiss_btn.setProperty("cls", "primary")
+        self.dismiss_btn.clicked.connect(self.hide)
+        button_row.addWidget(self.dismiss_btn)
+        card_layout.addLayout(button_row)
+
+        row.addWidget(self.card)
+        row.addStretch()
+        outer.addLayout(row)
+        outer.addStretch()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
+        painter.end()
+
+    def mousePressEvent(self, event):
+        # Clicking the dimmed backdrop dismisses. Labels and frames ignore
+        # mouse presses, so a click on the card itself would otherwise
+        # propagate up to here and close the splash mid-read.
+        if not self.card.geometry().contains(event.pos()):
+            self.hide()
+
+    def apply_theme(self, p: dict):
+        self.setStyleSheet(widget_qss(p) + f"""
+            QFrame#splash_card {{
+                background: {p['panel']};
+                border: 1px solid {p['border']};
+                border-radius: 8px;
+            }}
+        """)
+        self.title_label.setStyleSheet("color: #ff8080; background: transparent;")
+        self.body_label.setStyleSheet(f"color: {p['text']}; background: transparent;")
+        self.list_label.setStyleSheet(f"color: {p['text_dim']}; background: transparent;")
+        repolish(self)
+
+    def show_error(self, missing_names: List[str]):
+        count = len(missing_names)
+        is_one = count == 1
+        self.body_label.setText(
+            f"{count} {'piece' if is_one else 'pieces'} of furniture "
+            f"{'has' if is_one else 'have'} no height set. The 3D room is built by standing "
+            "each piece up to its real height, so it can't be drawn until every one of them "
+            "has one. Pick each piece below in Zones / Furniture, set its Height (in), then "
+            "turn 3D back on."
+        )
+        shown = missing_names[:8]
+        text = "\n".join(f"    - {name}" for name in shown)
+        if count > len(shown):
+            text += f"\n    - ...and {count - len(shown)} more"
+        self.list_label.setText(text)
+        parent = self.parent()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
 
 
 class RoomSetupPanel(QWidget):
@@ -538,6 +990,7 @@ class RoomSetupPanel(QWidget):
         self._refresh_zone_list()
         self._refresh_object_list()
         self.apply_theme(self.palette)
+        self._update_view_mode_hint()
         self._restore_layout()
 
     def apply_theme(self, palette: dict):
@@ -553,6 +1006,7 @@ class RoomSetupPanel(QWidget):
         """)
         repolish(self)
         self.canvas.apply_theme(palette)
+        self._height_splash.apply_theme(palette)
 
         self.dock_host.setStyleSheet(f"""
             QMainWindow {{ background-color: {p['bg']}; }}
@@ -596,6 +1050,11 @@ class RoomSetupPanel(QWidget):
             self.dock_host.restoreState(state, self._DOCK_LAYOUT_VERSION)
         except Exception:
             pass
+        # A layout saved back when panels could be torn off would otherwise
+        # restore a floating dock that there is no longer any way to drag
+        # back into place.
+        for dock in self._room_docks:
+            dock.setFloating(False)
 
     def save_layout(self):
         """Persist the current dock panel arrangement (size/position/floating
@@ -624,6 +1083,7 @@ class RoomSetupPanel(QWidget):
         self._refresh_zone_list()
         self._refresh_drawer_list()
         self._refresh_object_list()
+        self._sync_3d_mode()
 
     def _setup_ui(self):
         outer = QVBoxLayout(self)
@@ -657,21 +1117,27 @@ class RoomSetupPanel(QWidget):
         profile_row.setSpacing(8)
         profile_row.addWidget(self._label("Editing Room"))
         self.profile_selector = QComboBox()
+        self.profile_selector.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.profile_selector.setMinimumContentsLength(8)
+        self.profile_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
         profile_row.addWidget(self.profile_selector, 1)
 
         self.new_room_btn = QPushButton("New Room")
         self.new_room_btn.setProperty("cls", "secondary")
+        self.new_room_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.new_room_btn.clicked.connect(self._on_new_room)
         profile_row.addWidget(self.new_room_btn)
 
         self.rename_room_btn = QPushButton("Rename")
         self.rename_room_btn.setProperty("cls", "secondary")
+        self.rename_room_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.rename_room_btn.clicked.connect(self._on_rename_room)
         profile_row.addWidget(self.rename_room_btn)
 
         self.delete_room_btn = QPushButton("Delete")
         self.delete_room_btn.setProperty("cls", "secondary")
+        self.delete_room_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.delete_room_btn.clicked.connect(self._on_delete_room)
         profile_row.addWidget(self.delete_room_btn)
         left_layout.addLayout(profile_row)
@@ -688,21 +1154,44 @@ class RoomSetupPanel(QWidget):
 
         dims_row = QHBoxLayout()
         dims_row.setSpacing(8)
-        dims_row.addWidget(self._label("Width (m)"))
+        dims_row.addWidget(self._label("Width (ft)"))
         self.width_input = QDoubleSpinBox()
-        self.width_input.setRange(1.0, 30.0)
-        self.width_input.setSingleStep(0.1)
+        self.width_input.setRange(m_to_ft(1.0), m_to_ft(30.0))
+        self.width_input.setDecimals(1)
+        self.width_input.setSingleStep(0.5)
+        self.width_input.setSuffix(" ft")
         self.width_input.valueChanged.connect(self._on_size_changed)
         dims_row.addWidget(self.width_input)
 
-        dims_row.addWidget(self._label("Height (m)"))
+        # "Depth", not "Height" - this is the room's second floor-plan axis,
+        # and there is now a separate Height field for how tall a piece of
+        # furniture stands.
+        dims_row.addWidget(self._label("Depth (ft)"))
         self.height_input = QDoubleSpinBox()
-        self.height_input.setRange(1.0, 30.0)
-        self.height_input.setSingleStep(0.1)
+        self.height_input.setRange(m_to_ft(1.0), m_to_ft(30.0))
+        self.height_input.setDecimals(1)
+        self.height_input.setSingleStep(0.5)
+        self.height_input.setSuffix(" ft")
         self.height_input.valueChanged.connect(self._on_size_changed)
         dims_row.addWidget(self.height_input)
         dims_row.addStretch()
         left_layout.addLayout(dims_row)
+
+        view_row = QHBoxLayout()
+        view_row.setSpacing(8)
+        self.view_3d_btn = QPushButton("3D View")
+        self.view_3d_btn.setCheckable(True)
+        self.view_3d_btn.setProperty("cls", "secondary")
+        self.view_3d_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.view_3d_btn.clicked.connect(self._on_toggle_3d)
+        view_row.addWidget(self.view_3d_btn)
+        view_row.addStretch()
+        left_layout.addLayout(view_row)
+
+        self.view_mode_hint = QLabel("")
+        self.view_mode_hint.setProperty("cls", "hint")
+        self.view_mode_hint.setWordWrap(True)
+        left_layout.addWidget(self.view_mode_hint)
 
         camera_hint = QLabel(
             "Add, rename, or remove cameras from the Cameras tab. Once a camera's added, "
@@ -799,6 +1288,63 @@ class RoomSetupPanel(QWidget):
         self.delete_zone_btn.clicked.connect(self._on_delete_zone)
         rename_row.addWidget(self.delete_zone_btn)
         right_layout.addLayout(rename_row)
+
+        settings_sep = QFrame()
+        settings_sep.setFrameShape(QFrame.HLine)
+        settings_sep.setProperty("cls", "sep")
+        right_layout.addWidget(settings_sep)
+
+        self.zone_settings_label = QLabel("Select a piece of furniture to edit its settings")
+        self.zone_settings_label.setProperty("cls", "muted")
+        self.zone_settings_label.setWordWrap(True)
+        right_layout.addWidget(self.zone_settings_label)
+
+        type_row = QHBoxLayout()
+        type_row.setSpacing(8)
+        type_row.addWidget(self._label("Type"))
+        self.zone_type_input = QComboBox()
+        self.zone_type_input.addItems(FURNITURE_TYPES)
+        self.zone_type_input.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.zone_type_input.setMinimumContentsLength(6)
+        self.zone_type_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.zone_type_input.setEnabled(False)
+        self.zone_type_input.currentIndexChanged.connect(self._on_zone_type_changed)
+        type_row.addWidget(self.zone_type_input, 1)
+        right_layout.addLayout(type_row)
+
+        height_row = QHBoxLayout()
+        height_row.setSpacing(8)
+        # Inches rather than feet: furniture is measured in them ("a 32 inch
+        # dresser"), and decimal feet would make every value a fraction.
+        height_row.addWidget(self._label("Height (in)"))
+        self.zone_height_input = QDoubleSpinBox()
+        self.zone_height_input.setRange(0.0, m_to_in(5.0))
+        self.zone_height_input.setSingleStep(1.0)
+        self.zone_height_input.setDecimals(1)
+        self.zone_height_input.setSuffix(" in")
+        # 0.00 is "no height yet" rather than a zero-height object, so it
+        # reads as unset instead of as a deliberate answer.
+        self.zone_height_input.setSpecialValueText("Not set")
+        self.zone_height_input.setEnabled(False)
+        self.zone_height_input.valueChanged.connect(self._on_zone_height_changed)
+        height_row.addWidget(self.zone_height_input, 1)
+        right_layout.addLayout(height_row)
+
+        height_hint = QLabel(
+            "How tall this piece stands off the floor - a bed is roughly 24 in, a dresser "
+            "32 in, a desk 30 in, a wardrobe 78 in. The 3D view needs one on every piece "
+            "before it will open."
+        )
+        height_hint.setProperty("cls", "hint")
+        height_hint.setWordWrap(True)
+        right_layout.addWidget(height_hint)
+
+        self.zone_notes_input = QLineEdit()
+        self.zone_notes_input.setPlaceholderText("Notes (e.g. \"Kids' clothes\", \"keep unlocked\")")
+        self.zone_notes_input.setEnabled(False)
+        self.zone_notes_input.editingFinished.connect(self._on_zone_notes_changed)
+        right_layout.addWidget(self.zone_notes_input)
+
         right_layout.addStretch()
 
         zones_scroll = QScrollArea()
@@ -809,9 +1355,7 @@ class RoomSetupPanel(QWidget):
         self.zones_dock = QDockWidget("Zones / Furniture", self.dock_host)
         self.zones_dock.setObjectName("zones_dock")
         self.zones_dock.setWidget(zones_scroll)
-        self.zones_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
+        self.zones_dock.setFeatures(LOCKED_DOCK_FEATURES)
         self.zones_title = _CollapsibleDockTitle("Zones / Furniture", self.zones_dock, self.dock_host)
         self.zones_dock.setTitleBarWidget(self.zones_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.zones_dock)
@@ -833,14 +1377,19 @@ class RoomSetupPanel(QWidget):
         self.drawer_count_input = QSpinBox()
         self.drawer_count_input.setRange(0, 8)
         self.drawer_count_input.setPrefix("Drawers ")
+        self.drawer_count_input.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         drawer_config_row.addWidget(self.drawer_count_input)
 
         self.drawer_orientation_input = QComboBox()
         self.drawer_orientation_input.addItems(["Stacked (top-bottom)", "Side by side (left-right)"])
-        drawer_config_row.addWidget(self.drawer_orientation_input)
+        self.drawer_orientation_input.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.drawer_orientation_input.setMinimumContentsLength(6)
+        self.drawer_orientation_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        drawer_config_row.addWidget(self.drawer_orientation_input, 1)
 
         self.set_drawers_btn = QPushButton("Set Drawers")
         self.set_drawers_btn.setProperty("cls", "secondary")
+        self.set_drawers_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.set_drawers_btn.clicked.connect(self._on_set_drawers)
         drawer_config_row.addWidget(self.set_drawers_btn)
         right_layout.addLayout(drawer_config_row)
@@ -872,9 +1421,7 @@ class RoomSetupPanel(QWidget):
         self.drawers_dock = QDockWidget("Drawers", self.dock_host)
         self.drawers_dock.setObjectName("drawers_dock")
         self.drawers_dock.setWidget(drawers_scroll)
-        self.drawers_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
+        self.drawers_dock.setFeatures(LOCKED_DOCK_FEATURES)
         self.drawers_title = _CollapsibleDockTitle("Drawers", self.drawers_dock, self.dock_host)
         self.drawers_dock.setTitleBarWidget(self.drawers_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.drawers_dock)
@@ -917,22 +1464,24 @@ class RoomSetupPanel(QWidget):
         self.objects_dock = QDockWidget("Detected Objects", self.dock_host)
         self.objects_dock.setObjectName("objects_dock")
         self.objects_dock.setWidget(objects_scroll)
-        self.objects_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
+        self.objects_dock.setFeatures(LOCKED_DOCK_FEATURES)
         self.objects_title = _CollapsibleDockTitle("Detected Objects", self.objects_dock, self.dock_host)
         self.objects_dock.setTitleBarWidget(self.objects_title)
         self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.objects_dock)
         view_menu.addAction(self.objects_dock.toggleViewAction())
 
-        # Zones/Drawers/Detected Objects are independent dock panels - drag
-        # by their title bar to move or tab them together, drag an edge to
-        # resize, or float/close them (reopen via the "Panels" menu).
-        # Exposed as _room_docks so Panel Customization can still pull each
-        # one out to the sidebar individually.
+        # Zones/Drawers/Detected Objects are independent dock panels - collapse
+        # them from their title bar, drag an edge to resize, or hide them
+        # (reopen via the "Panels" menu). Where they sit is fixed here and
+        # changed only in Settings > Customization, which is why they are
+        # exposed as _room_docks - that screen pulls each one out to its
+        # sidebar individually.
         self._room_docks: List[QDockWidget] = [
             self.zones_dock, self.drawers_dock, self.objects_dock,
         ]
+        for dock in self._room_docks:
+            dock.setMinimumWidth(260)
+        self.dock_host.resizeDocks(self._room_docks, [320] * len(self._room_docks), Qt.Horizontal)
 
         # "Save Room" stays outside the dock area, always reachable no
         # matter how the panels get rearranged.
@@ -946,10 +1495,26 @@ class RoomSetupPanel(QWidget):
         save_row.addWidget(self.save_btn)
         outer.addLayout(save_row)
 
+        # The metres the size fields were last loaded with - see _dim_to_m.
+        self._loaded_width_m = 0.0
+        self._loaded_height_m = 0.0
+
         self._selected_zone_index: Optional[int] = None
         self._selected_drawer_index: Optional[int] = None
         self._selected_camera_index: Optional[int] = None
         self._selected_object_id: Optional[int] = None
+
+        # Covers the whole tab, so it is created against the panel itself
+        # rather than the dock host or the canvas.
+        self._height_splash = _HeightRequiredSplash(self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Laying out the panel can resize it before _setup_ui has finished,
+        # so the splash is not guaranteed to exist yet.
+        splash = getattr(self, '_height_splash', None)
+        if splash is not None and splash.isVisible():
+            splash.setGeometry(self.rect())
 
     def _label(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -958,18 +1523,99 @@ class RoomSetupPanel(QWidget):
 
     def _load_from_config(self):
         profile = self._active_profile()
+        self._loaded_width_m = profile.width_m
+        self._loaded_height_m = profile.height_m
         self.width_input.blockSignals(True)
         self.height_input.blockSignals(True)
-        self.width_input.setValue(profile.width_m)
-        self.height_input.setValue(profile.height_m)
+        self.width_input.setValue(m_to_ft(profile.width_m))
+        self.height_input.setValue(m_to_ft(profile.height_m))
         self.width_input.blockSignals(False)
         self.height_input.blockSignals(False)
         self.canvas.set_room_size(profile.width_m, profile.height_m)
         self.canvas.set_zones(self.zones)
         self.canvas.set_cameras(self.cameras)
 
+    @staticmethod
+    def _dim_to_m(shown_ft: float, loaded_m: float) -> float:
+        """Feet from a size field back to metres.
+
+        A field the user hasn't touched is answered from the metres it was
+        loaded with rather than converted back: the display rounds to a tenth
+        of a foot, so round-tripping an untouched room would nudge its size by
+        a centimetre or so every time it was saved.
+        """
+        if round(shown_ft, 1) == round(m_to_ft(loaded_m), 1):
+            return loaded_m
+        return ft_to_m(shown_ft)
+
+    def _room_width_m(self) -> float:
+        return self._dim_to_m(self.width_input.value(), self._loaded_width_m)
+
+    def _room_height_m(self) -> float:
+        return self._dim_to_m(self.height_input.value(), self._loaded_height_m)
+
     def _on_size_changed(self):
-        self.canvas.set_room_size(self.width_input.value(), self.height_input.value())
+        self.canvas.set_room_size(self._room_width_m(), self._room_height_m())
+
+    def _on_toggle_3d(self, checked: bool):
+        if not checked:
+            self.canvas.set_view_3d(False)
+            self.draw_zone_btn.setEnabled(True)
+            self._update_view_mode_hint()
+            self.status_label.setText("Back to the 2D floor plan.")
+            return
+
+        missing = zones_missing_height(self.zones)
+        if missing:
+            self.view_3d_btn.setChecked(False)
+            self.canvas.set_view_3d(False)
+            self.draw_zone_btn.setEnabled(True)
+            self._update_view_mode_hint()
+            self._height_splash.show_error(missing)
+            return
+
+        # Drawing a zone needs a click to mean one point on the floor, which
+        # it no longer does once the room is tilted - so that control is
+        # parked while 3D is on rather than silently misbehaving.
+        self.draw_zone_btn.setChecked(False)
+        self.draw_zone_btn.setEnabled(False)
+        self.canvas.set_draw_mode(False)
+        self.canvas.set_view_3d(True)
+        self._update_view_mode_hint()
+        self.status_label.setText("3D view on - drag the room to orbit it.")
+
+    def _sync_3d_mode(self):
+        """Drop back to 2D (with the splash) when the furniture on screen no
+        longer all has a height - switching rooms, scanning, or clearing a
+        height can bring in pieces that don't."""
+        if self.canvas.view_3d:
+            missing = zones_missing_height(self.zones)
+            if missing:
+                self.view_3d_btn.setChecked(False)
+                self.canvas.set_view_3d(False)
+                self.draw_zone_btn.setEnabled(True)
+                self._height_splash.show_error(missing)
+        self._update_view_mode_hint()
+
+    def _update_view_mode_hint(self):
+        if self.canvas.view_3d:
+            self.view_mode_hint.setText(
+                "3D view: every piece stands at the height you gave it. Drag the room to orbit "
+                "it. Switch back to 2D to draw, move, or resize anything."
+            )
+            return
+        missing = zones_missing_height(self.zones)
+        if missing:
+            count = len(missing)
+            self.view_mode_hint.setText(
+                f"2D floor plan. {count} {'piece' if count == 1 else 'pieces'} of furniture "
+                f"still {'needs' if count == 1 else 'need'} a height before 3D can be turned on: "
+                + ", ".join(missing[:5]) + ("..." if count > 5 else "")
+            )
+        else:
+            self.view_mode_hint.setText(
+                "2D floor plan. Turn on 3D to stand the furniture up at its real height."
+            )
 
     def _refresh_profile_list(self):
         self.profile_selector.blockSignals(True)
@@ -994,6 +1640,7 @@ class RoomSetupPanel(QWidget):
         self._refresh_zone_list()
         self._refresh_drawer_list()
         self._refresh_object_list()
+        self._sync_3d_mode()
         self.status_label.setText(f"Editing \"{profile.name}\".")
 
     def _on_new_room(self):
@@ -1063,9 +1710,13 @@ class RoomSetupPanel(QWidget):
 
     def _on_zone_drawn(self, x1: float, y1: float, x2: float, y2: float):
         name = self.zone_name_input.text().strip() or f"Zone {len(self.zones) + 1}"
-        self.zones.append({"name": name, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        self.zones.append({
+            "name": name, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "type": _guess_furniture_type(name), "notes": "", "height_m": 0.0,
+        })
         self.canvas.set_zones(self.zones)
         self._refresh_zone_list()
+        self._update_view_mode_hint()
         self.zone_name_input.clear()
         self.draw_zone_btn.setChecked(False)
         self.canvas.set_draw_mode(False)
@@ -1077,8 +1728,8 @@ class RoomSetupPanel(QWidget):
         db.close()
 
         temp_config = RoomConfig(
-            width_m=self.width_input.value(),
-            height_m=self.height_input.value(),
+            width_m=self._room_width_m(),
+            height_m=self._room_height_m(),
             cameras=self.cameras,
             zones=self.zones,
         )
@@ -1103,11 +1754,15 @@ class RoomSetupPanel(QWidget):
                 existing["x1"], existing["y1"], existing["x2"], existing["y2"] = x1, y1, x2, y2
                 updated += 1
             else:
-                self.zones.append({"name": zone_name, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                self.zones.append({
+                    "name": zone_name, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "type": _guess_furniture_type(zone_name), "notes": "", "height_m": 0.0,
+                })
                 added += 1
 
         self.canvas.set_zones(self.zones)
         self._refresh_zone_list()
+        self._sync_3d_mode()
 
         if added or updated:
             self.status_label.setText(
@@ -1125,8 +1780,12 @@ class RoomSetupPanel(QWidget):
         for i, zone in enumerate(self.zones):
             drawer_count = len(zone.get("drawers", []))
             tag = f", {drawer_count} drawers" if drawer_count else ""
+            height = zone_height(zone)
+            height_tag = f"{format_ft_in(height)} tall" if height > 0 else "no height"
             text = (f"{zone['name']}{tag}  "
-                    f"({zone['x1']:.1f},{zone['y1']:.1f}) -> ({zone['x2']:.1f},{zone['y2']:.1f})")
+                    f"({m_to_ft(zone['x1']):.1f}, {m_to_ft(zone['y1']):.1f}) -> "
+                    f"({m_to_ft(zone['x2']):.1f}, {m_to_ft(zone['y2']):.1f}) ft  "
+                    f"[{height_tag}]")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, i)
             self.zone_list.addItem(item)
@@ -1138,12 +1797,84 @@ class RoomSetupPanel(QWidget):
         self.canvas.update()
         self.zone_rename_input.setText(self.zones[index]["name"])
         self._refresh_drawer_list()
+        self._refresh_zone_settings()
 
     def _on_zone_selected_in_canvas(self, index: int):
         self._selected_zone_index = index
         self.zone_list.setCurrentRow(index)
         self.zone_rename_input.setText(self.zones[index]["name"])
         self._refresh_drawer_list()
+        self._refresh_zone_settings()
+
+    def _refresh_zone_settings(self):
+        """Populates the Type/Notes fields for whichever piece of furniture
+        is currently selected - clicking a different zone (on the canvas or
+        in the list above) re-scopes these to just that one object."""
+        index = self._selected_zone_index
+        if index is None:
+            self.zone_settings_label.setText("Select a piece of furniture to edit its settings")
+            self.zone_type_input.setEnabled(False)
+            self.zone_notes_input.setEnabled(False)
+            self.zone_notes_input.clear()
+            self.zone_height_input.setEnabled(False)
+            self.zone_height_input.blockSignals(True)
+            self.zone_height_input.setValue(0.0)
+            self.zone_height_input.blockSignals(False)
+            self.zone_type_input.blockSignals(True)
+            self.zone_type_input.setCurrentIndex(0)
+            self.zone_type_input.blockSignals(False)
+            return
+
+        zone = self.zones[index]
+        self.zone_settings_label.setText(f"Settings for \"{zone['name']}\"")
+        self.zone_type_input.setEnabled(True)
+        self.zone_notes_input.setEnabled(True)
+        self.zone_height_input.setEnabled(True)
+
+        self.zone_height_input.blockSignals(True)
+        self.zone_height_input.setValue(m_to_in(zone_height(zone)))
+        self.zone_height_input.blockSignals(False)
+
+        self.zone_type_input.blockSignals(True)
+        self.zone_type_input.setCurrentText(zone.get("type", "Other"))
+        self.zone_type_input.blockSignals(False)
+
+        self.zone_notes_input.blockSignals(True)
+        self.zone_notes_input.setText(zone.get("notes", ""))
+        self.zone_notes_input.blockSignals(False)
+
+    def _on_zone_type_changed(self, _index: int):
+        if self._selected_zone_index is None:
+            return
+        self.zones[self._selected_zone_index]["type"] = self.zone_type_input.currentText()
+        self.status_label.setText("Updated furniture type. Don't forget to Save Room.")
+
+    def _on_zone_height_changed(self, inches: float):
+        if self._selected_zone_index is None:
+            return
+        zone = self.zones[self._selected_zone_index]
+        zone["height_m"] = in_to_m(inches)
+        # self.zones is the same list the canvas holds, so a repaint is all
+        # that's needed - set_zones() would clear the current selection.
+        self.canvas.update()
+        self._refresh_zone_list()
+        self.zone_list.setCurrentRow(self._selected_zone_index)
+        if inches > 0:
+            self.status_label.setText(
+                f"\"{zone['name']}\" is {format_ft_in(zone['height_m'])} tall. "
+                "Don't forget to Save Room."
+            )
+        else:
+            self.status_label.setText(
+                f"Cleared the height on \"{zone['name']}\" - 3D view needs one on every piece."
+            )
+        self._sync_3d_mode()
+
+    def _on_zone_notes_changed(self):
+        if self._selected_zone_index is None:
+            return
+        self.zones[self._selected_zone_index]["notes"] = self.zone_notes_input.text().strip()
+        self.status_label.setText("Updated furniture notes. Don't forget to Save Room.")
 
     def _on_zone_drag_finished(self):
         self._refresh_zone_list()
@@ -1163,6 +1894,7 @@ class RoomSetupPanel(QWidget):
         self.canvas.selected_index = self._selected_zone_index
         self._refresh_zone_list()
         self.zone_list.setCurrentRow(self._selected_zone_index)
+        self._update_view_mode_hint()
         self.status_label.setText(f"Renamed zone to \"{new_name}\". Don't forget to Save Room.")
 
     def _on_rotate_zone(self):
@@ -1175,7 +1907,7 @@ class RoomSetupPanel(QWidget):
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         half_w, half_h = (x2 - x1) / 2.0, (y2 - y1) / 2.0
 
-        room_w, room_h = self.width_input.value(), self.height_input.value()
+        room_w, room_h = self._room_width_m(), self._room_height_m()
         nx1, nx2 = _clamp_axis(cx - half_h, cx + half_h, room_w)
         ny1, ny2 = _clamp_axis(cy - half_w, cy + half_w, room_h)
 
@@ -1199,6 +1931,8 @@ class RoomSetupPanel(QWidget):
         self.canvas.set_zones(self.zones)
         self._refresh_zone_list()
         self._refresh_drawer_list()
+        self._refresh_zone_settings()
+        self._update_view_mode_hint()
         self.status_label.setText(f"Deleted zone \"{removed['name']}\". Don't forget to Save Room.")
 
     def _refresh_drawer_list(self):
@@ -1291,8 +2025,10 @@ class RoomSetupPanel(QWidget):
 
     def _on_save(self):
         profile = self._active_profile()
-        profile.width_m = self.width_input.value()
-        profile.height_m = self.height_input.value()
+        profile.width_m = self._room_width_m()
+        profile.height_m = self._room_height_m()
+        self._loaded_width_m = profile.width_m
+        self._loaded_height_m = profile.height_m
         profile.zones = self.zones
         profile.cameras = self.cameras
         save_room_profiles(self.profiles)
@@ -1312,7 +2048,9 @@ class RoomSetupPanel(QWidget):
         self.status_label.setText(f"Removed \"{removed['label']}\". Don't forget to Save Room.")
 
     def _on_camera_moved(self, index: int, x: float, y: float):
-        self.status_label.setText(f"{self.cameras[index]['label']} at ({x:.2f}m, {y:.2f}m)")
+        self.status_label.setText(
+            f"{self.cameras[index]['label']} at ({m_to_ft(x):.1f} ft, {m_to_ft(y):.1f} ft)"
+        )
 
     def _on_camera_drag_finished(self):
         self.status_label.setText(self.status_label.text() + " - don't forget to Save Room.")

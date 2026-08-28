@@ -1,4 +1,5 @@
 import json
+import os
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -10,6 +11,14 @@ from PyQt5.QtGui import QFont
 
 NAV_TAB_KEYS_DEFAULT = ["room", "room_setup", "file", "device"]
 DOCK_PANEL_KEYS_DEFAULT = ["camera_dock", "found_items_dock"]
+
+# Panels are pinned where they are in the live app: no Movable (drag to a
+# different edge), no Floatable (tear off into its own window). Rearranging
+# them is done deliberately, in Settings > Customization, against a preview -
+# so an accidental drag on the title bar can't scramble the workspace.
+# Closable stays on so a panel can still be hidden and brought back from the
+# View menu, which doesn't change where anything sits.
+LOCKED_DOCK_FEATURES = QDockWidget.DockWidgetClosable
 
 
 class ClickableLabel(QLabel):
@@ -60,6 +69,7 @@ from found_it.storage.models import DetectedItem
 from found_it.utils.room_profiles import load_room_profiles
 from found_it.utils.app_settings import load_app_settings, save_app_settings
 from found_it.utils.themes import get_palette, repolish
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.gui.camera_view import CameraView
 from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
@@ -141,6 +151,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.app_title)
 
         nav_layout.addSpacing(24)
+        nav_layout.addStretch()
 
         self.mode_room_btn = QPushButton("Room Tracker")
         self.mode_room_btn.setCheckable(True)
@@ -176,7 +187,8 @@ class MainWindow(QMainWindow):
 
         nav_layout.addStretch()
 
-        self.settings_btn = QPushButton("⚙")
+        self.settings_btn = QPushButton()
+        self.settings_btn.setIconSize(ICON_SIZE)
         self.settings_btn.setCheckable(True)
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.setFixedWidth(36)
@@ -185,19 +197,22 @@ class MainWindow(QMainWindow):
 
         nav_layout.addSpacing(12)
 
-        self.minimize_btn = QPushButton("─")
+        self.minimize_btn = QPushButton()
+        self.minimize_btn.setIconSize(ICON_SIZE)
         self.minimize_btn.setFixedSize(44, 48)
         self.minimize_btn.setToolTip("Minimize")
         self.minimize_btn.clicked.connect(self.showMinimized)
         nav_layout.addWidget(self.minimize_btn)
 
-        self.maximize_btn = QPushButton("☐")
+        self.maximize_btn = QPushButton()
+        self.maximize_btn.setIconSize(ICON_SIZE)
         self.maximize_btn.setFixedSize(44, 48)
         self.maximize_btn.setToolTip("Maximize")
         self.maximize_btn.clicked.connect(self._toggle_maximize)
         nav_layout.addWidget(self.maximize_btn)
 
-        self.close_btn = QPushButton("✕")
+        self.close_btn = QPushButton()
+        self.close_btn.setIconSize(ICON_SIZE)
         self.close_btn.setFixedSize(44, 48)
         self.close_btn.setToolTip("Close")
         self.close_btn.clicked.connect(self.close)
@@ -253,24 +268,26 @@ class MainWindow(QMainWindow):
         for btn in (self.mode_room_btn, self.mode_room_setup_btn, self.mode_file_btn,
                     self.mode_device_btn, self.mode_cameras_btn):
             btn.setStyleSheet(nav_style)
-        self.settings_btn.setStyleSheet(self._nav_button_style("font-size: 16px; padding: 8px;"))
+        self.settings_btn.setStyleSheet(self._nav_button_style("padding: 8px;"))
+        self.settings_btn.setIcon(get_icon("settings", p["text_faint"]))
 
         window_btn_style = f"""
             QPushButton {{
-                background: transparent; color: {p['text_faint']}; border: none;
-                font-size: 13px; font-weight: bold;
+                background: transparent; border: none;
             }}
-            QPushButton:hover {{ background-color: {p['selected']}; color: {p['text']}; }}
+            QPushButton:hover {{ background-color: {p['selected']}; }}
         """
         self.minimize_btn.setStyleSheet(window_btn_style)
         self.maximize_btn.setStyleSheet(window_btn_style)
         self.close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: transparent; color: {p['text_faint']}; border: none;
-                font-size: 13px; font-weight: bold;
+                background: transparent; border: none;
             }}
-            QPushButton:hover {{ background-color: #e53935; color: white; }}
+            QPushButton:hover {{ background-color: #e53935; }}
         """)
+        self.minimize_btn.setIcon(get_icon("minus", p["text_faint"]))
+        self.maximize_btn.setIcon(get_icon("copy" if self.isMaximized() else "square", p["text_faint"]))
+        self.close_btn.setIcon(get_icon("x", p["text_faint"]))
 
         self.statusBar().setStyleSheet(f"color: {p['text_faint']}; background: {p['header']};")
 
@@ -358,7 +375,7 @@ class MainWindow(QMainWindow):
 
         view_menu = tracker.menuBar().addMenu("View")
 
-        # --- Cameras dock: movable, floatable, closable - drag it wherever ---
+        # --- Cameras dock: position fixed, see LOCKED_DOCK_FEATURES ---
         camera_widget = QWidget()
         camera_layout = QVBoxLayout(camera_widget)
         camera_layout.setContentsMargins(8, 8, 8, 8)
@@ -381,13 +398,11 @@ class MainWindow(QMainWindow):
         self.camera_dock = QDockWidget("Cameras", tracker)
         self.camera_dock.setObjectName("camera_dock")
         self.camera_dock.setWidget(camera_widget)
-        self.camera_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
+        self.camera_dock.setFeatures(LOCKED_DOCK_FEATURES)
         tracker.addDockWidget(Qt.LeftDockWidgetArea, self.camera_dock)
         view_menu.addAction(self.camera_dock.toggleViewAction())
 
-        # --- Found Items dock: movable, floatable, closable ---
+        # --- Found Items dock: position fixed, see LOCKED_DOCK_FEATURES ---
         self.search_panel = SearchPanel()
         self.search_panel.item_selected.connect(self._on_item_selected)
         self.search_panel.set_room_names({p.id: p.name for p in self.room_profiles})
@@ -395,9 +410,7 @@ class MainWindow(QMainWindow):
         self.found_items_dock = QDockWidget("Found Items", tracker)
         self.found_items_dock.setObjectName("found_items_dock")
         self.found_items_dock.setWidget(self.search_panel)
-        self.found_items_dock.setFeatures(
-            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
-        )
+        self.found_items_dock.setFeatures(LOCKED_DOCK_FEATURES)
         tracker.addDockWidget(Qt.RightDockWidgetArea, self.found_items_dock)
         view_menu.addAction(self.found_items_dock.toggleViewAction())
 
@@ -433,9 +446,14 @@ class MainWindow(QMainWindow):
         tracker.setCentralWidget(center_panel)
 
         self.room_widget = tracker
-        self._apply_dock_panel_order()
 
         self._restore_room_tracker_layout(tracker)
+        # Applied *after* the restore, not before: the saved state describes
+        # wherever the docks last sat, which for a layout saved back when they
+        # were draggable can contradict - or float away from - the arrangement
+        # set in Customization. Customization is the only way to move panels
+        # now, so it gets the last word and the restore only carries sizes.
+        self._apply_dock_panel_order()
 
         return tracker
 
@@ -477,6 +495,9 @@ class MainWindow(QMainWindow):
         for area, key in zip(areas, order):
             dock = docks.get(key)
             if dock is not None:
+                # A layout saved while the dock was torn off would otherwise
+                # leave it floating with no way to drag it back.
+                dock.setFloating(False)
                 self.room_widget.addDockWidget(area, dock)
 
     def _toggle_maximize(self):
@@ -487,7 +508,7 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange and hasattr(self, "maximize_btn"):
-            self.maximize_btn.setText("❐" if self.isMaximized() else "☐")
+            self.maximize_btn.setIcon(get_icon("copy" if self.isMaximized() else "square", self.palette["text_faint"]))
             self.maximize_btn.setToolTip("Restore" if self.isMaximized() else "Maximize")
         super().changeEvent(event)
 
@@ -799,7 +820,10 @@ class MainWindow(QMainWindow):
 
                 if cam_cfg.get("is_360"):
                     dewarpers[cam_id] = EquirectangularDewarp(fov=90.0, num_views=4)
-                elif self.app_settings.dewarp_default:
+                elif cam_cfg.get("is_180") or self.app_settings.dewarp_default:
+                    # A 180 deg lens is a fisheye lens - its barrel distortion
+                    # is severe enough at the edges that it's always worth
+                    # correcting, regardless of the app-wide dewarp default.
                     dewarper = FisheyeDewarp(cam_id)
                     frame = cam.get_frame()
                     if frame is not None:
@@ -844,6 +868,40 @@ class MainWindow(QMainWindow):
     def _on_dewarp_toggled(self, checked: bool):
         self.detection_worker.dewarp_enabled = checked
 
+    @staticmethod
+    def _one_detection_per_label(merged: list) -> list:
+        """Collapse a cycle's detections down to the best-scoring one per
+        label.
+
+        Only one row per (label, room) can be active at a time - see
+        Database.deactivate_other_positions - so two detections of the same
+        label reaching the database individually cannot both be stored. What
+        happened instead was that each one failed to find the other's row,
+        inserted its own, wrote a snapshot, and deactivated its rival, over
+        and over at the detection frame rate. Picking a winner here settles
+        that in memory rather than letting the two fight on disk.
+
+        The one-instance-per-label limit is the existing data model, not
+        something introduced here: telling two objects of the same class
+        apart needs real tracking IDs, which the detector doesn't produce.
+        """
+        best: dict = {}
+        for det in merged:
+            key = det["label"].lower()
+            if key not in best or det["confidence"] > best[key]["confidence"]:
+                best[key] = det
+        return list(best.values())
+
+    @staticmethod
+    def _delete_snapshots(paths) -> None:
+        for path in paths:
+            try:
+                os.remove(path)
+            except OSError:
+                # Already gone, or held open by a viewer - the row's
+                # reference to it has been cleared either way.
+                pass
+
     def _on_detection_cycle_done(self, results: list, total_detections: int):
         """Runs on the GUI thread (queued signal from the detection worker
         thread) - this is where DB writes and status text updates happen,
@@ -859,35 +917,40 @@ class MainWindow(QMainWindow):
             # furniture already placed on the room map.
             mapper.calibrate_from_items(merged)
 
-            for det in merged:
+            for det in self._one_detection_per_label(merged):
                 room_x, room_y = mapper.pixel_to_room(
                     det["zone_x"], det["zone_y"], det["camera_id"]
                 )
                 zone_name = mapper.get_zone_name(room_x, room_y)
 
-                existing = self.db.find_matching_item(
-                    det["label"], det["camera_id"],
-                    det["zone_x"], det["zone_y"], profile_id
-                )
+                existing = self.db.find_active_item(det["label"], profile_id)
 
                 if existing:
                     bbox = (det["bbox_x1"], det["bbox_y1"], det["bbox_x2"], det["bbox_y2"])
                     self.db.update_item_position(
                         existing["id"], det["zone_x"], det["zone_y"],
-                        det["confidence"], zone_name, bbox=bbox
+                        det["confidence"], zone_name, bbox=bbox,
+                        camera_id=det["camera_id"],
                     )
                     self.db.deactivate_other_positions(det["label"], profile_id, existing["id"])
                 else:
-                    # Only new items are worth the disk write - an item that's
-                    # already tracked gets re-detected every cycle it sits
-                    # still, and update_item_position() never touches
-                    # snapshot_path, so snapshotting it again would be wasted I/O.
+                    # Only a genuinely new sighting is worth the disk write. An
+                    # already-tracked item takes the update branch above, which
+                    # leaves its existing snapshot in place.
                     snapshot_path = None
                     cam_frame = frames_by_cam.get(det["camera_id"])
                     if cam_frame is not None:
                         snapshot_path = self.detector.save_snapshot(
                             cam_frame, det["bbox_y1"], det["bbox_y2"],
                             det["bbox_x1"], det["bbox_x2"], det["label"], det["camera_id"]
+                        )
+                    if snapshot_path is not None:
+                        # Now that a replacement exists, drop the images from
+                        # this object's earlier sightings - deleted only after
+                        # the new one is safely written, so a failed capture
+                        # never leaves the item with no snapshot at all.
+                        self._delete_snapshots(
+                            self.db.take_previous_snapshots(det["label"], profile_id)
                         )
                     item = DetectedItem(
                         label=det["label"],
@@ -926,6 +989,31 @@ class MainWindow(QMainWindow):
             view = self.cam_views.get(cam_id)
             if view is not None:
                 view.update_frame(frame)
+
+        self._display_camera_settings_previews()
+
+    def _display_camera_settings_previews(self):
+        """Feed live frames into the Cameras tab's grid thumbnails / detail
+        preview - it tracks its own "which room am I editing" state
+        (independent of the displayed room above), so it's kept live here
+        rather than folding it into the loop over the active display room."""
+        if not self.camera_settings_panel.isVisible():
+            return
+
+        panel = self.camera_settings_panel
+        cams = self.room_cameras.get(panel.active_profile_id, {})
+        dewarpers = self.room_dewarpers.get(panel.active_profile_id, {})
+
+        for cam_id, view in panel.live_views.items():
+            cam = cams.get(cam_id)
+            if cam is None:
+                continue
+            frame = cam.get_frame()
+            if frame is None:
+                continue
+            if cam_id in dewarpers:
+                frame = dewarpers[cam_id].dewarp(frame)
+            view.update_frame(frame)
 
     def _cleanup_cycle(self):
         self.db.deactivate_old_items(ITEM_INACTIVE_SECONDS)

@@ -20,6 +20,7 @@ from found_it.utils.saved_devices import load_saved_devices, save_saved_devices
 from found_it.utils.room_profiles import load_room_profiles, save_room_profiles, profile_from_dict, profiles_to_list
 from found_it.utils.themes import THEME_NAMES, get_palette, widget_qss, repolish
 from found_it.device.adb_handler import ADBHandler
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.gui.splash import create_notice_splash
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.room_map import RoomMap
@@ -136,13 +137,29 @@ class SettingsPanel(QWidget):
         self._detected_devices = []
         self._selected_saved_index: Optional[int] = None
         self.palette = get_palette("Indigo")
+        self._icon_registry = []
         self._setup_ui()
         self.apply_theme(self.palette)
+
+    def _icon_btn(self, widget: QPushButton, name: str, color_kind: str) -> QPushButton:
+        """Registers a button for a Lucide icon that gets recolored on every
+        apply_theme() call (color_kind: "white", "destructive", or "dim")."""
+        widget.setIconSize(ICON_SIZE)
+        self._icon_registry.append((widget, name, color_kind))
+        return widget
 
     def apply_theme(self, palette: dict):
         self.palette = palette
         p = palette
         self.setStyleSheet(widget_qss(palette))
+
+        icon_colors = {
+            "white": "#ffffff", "destructive": "#e57373",
+            "dim": p["text_dim"], "faint": p["text_faint"],
+        }
+        for widget, name, color_kind in self._icon_registry:
+            widget.setIcon(get_icon(name, icon_colors[color_kind]))
+
         self.nav_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {p['header']};
@@ -416,7 +433,7 @@ class SettingsPanel(QWidget):
         self.appearance_status_label.setProperty("cls", "status")
         layout.addWidget(self.appearance_status_label)
 
-        save_btn = QPushButton("💾 Save Appearance Settings")
+        save_btn = self._icon_btn(QPushButton(" Save Appearance Settings"), "save", "white")
         save_btn.setProperty("cls", "primary")
         save_btn.clicked.connect(self._on_save_appearance_settings)
         layout.addWidget(save_btn)
@@ -514,12 +531,20 @@ class SettingsPanel(QWidget):
         sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
-        clear_history_btn = QPushButton("🗑 Clear Detection History")
+        clear_history_btn = self._icon_btn(QPushButton(" Clear Detection History"), "trash-2", "destructive")
         clear_history_btn.setProperty("cls", "destructive")
         clear_history_btn.clicked.connect(self._on_clear_history)
         layout.addWidget(clear_history_btn)
 
-        clear_snapshots_btn = QPushButton("🗑 Delete All Snapshots")
+        prune_snapshots_btn = self._icon_btn(QPushButton(" Remove Orphaned Snapshots"), "trash-2", "dim")
+        prune_snapshots_btn.setToolTip(
+            "Delete snapshot images that no tracked item refers to any more. "
+            "Snapshots still in use are kept."
+        )
+        prune_snapshots_btn.clicked.connect(self._on_prune_snapshots)
+        layout.addWidget(prune_snapshots_btn)
+
+        clear_snapshots_btn = self._icon_btn(QPushButton(" Delete All Snapshots"), "trash-2", "destructive")
         clear_snapshots_btn.setProperty("cls", "destructive")
         clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
         layout.addWidget(clear_snapshots_btn)
@@ -540,12 +565,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(room_data_hint)
 
         room_data_row = QHBoxLayout()
-        export_rooms_btn = QPushButton("⬆ Export Room Data...")
+        export_rooms_btn = self._icon_btn(QPushButton(" Export Room Data..."), "upload", "dim")
         export_rooms_btn.setProperty("cls", "secondary")
         export_rooms_btn.clicked.connect(self._on_export_rooms)
         room_data_row.addWidget(export_rooms_btn)
 
-        import_rooms_btn = QPushButton("⬇ Import Room Data...")
+        import_rooms_btn = self._icon_btn(QPushButton(" Import Room Data..."), "download", "dim")
         import_rooms_btn.setProperty("cls", "secondary")
         import_rooms_btn.clicked.connect(self._on_import_rooms)
         room_data_row.addWidget(import_rooms_btn)
@@ -588,10 +613,21 @@ class SettingsPanel(QWidget):
         if confirm != QMessageBox.Yes:
             return
         db = Database()
-        db.clear_all_items()
+        # The rows own their snapshot images; deleting the rows without the
+        # files left the images stranded on disk with nothing referencing them.
+        orphaned = db.clear_all_items()
         db.close()
+        removed = 0
+        for path in orphaned:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
         self._refresh_data_stats()
-        self.data_status_label.setText("Detection history cleared.")
+        self.data_status_label.setText(
+            f"Detection history cleared ({removed} snapshot(s) removed)."
+        )
 
     def _on_clear_snapshots(self):
         confirm = QMessageBox.question(
@@ -610,8 +646,42 @@ class SettingsPanel(QWidget):
                         deleted += 1
                     except OSError:
                         pass
+        # Every stored path now points at a file that's gone, so drop the
+        # references rather than leaving rows advertising missing images.
+        db = Database()
+        db.clear_snapshot_references()
+        db.close()
         self._refresh_data_stats()
         self.data_status_label.setText(f"Deleted {deleted} snapshot(s).")
+
+    def _on_prune_snapshots(self):
+        """Delete snapshot images no row references any more - the backlog
+        left behind by the churn bug, which nothing will ever display."""
+        db = Database()
+        referenced = db.get_referenced_snapshots()
+        db.close()
+
+        referenced = {os.path.normcase(os.path.abspath(p)) for p in referenced}
+        deleted = 0
+        freed = 0
+        if SNAPSHOTS_DIR.exists():
+            for f in SNAPSHOTS_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                if os.path.normcase(os.path.abspath(str(f))) in referenced:
+                    continue
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    freed += size
+                except OSError:
+                    pass
+
+        self._refresh_data_stats()
+        self.data_status_label.setText(
+            f"Removed {deleted} orphaned snapshot(s), freeing {freed / (1024 * 1024):.1f} MB."
+        )
 
     def _on_export_rooms(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -690,7 +760,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.detected_list)
 
         detect_row = QHBoxLayout()
-        self.refresh_detected_btn = QPushButton("↻ Refresh")
+        self.refresh_detected_btn = self._icon_btn(QPushButton(" Refresh"), "refresh-cw", "dim")
         self.refresh_detected_btn.setProperty("cls", "secondary")
         self.refresh_detected_btn.clicked.connect(self._refresh_detected_devices)
         detect_row.addWidget(self.refresh_detected_btn)
@@ -699,7 +769,7 @@ class SettingsPanel(QWidget):
         self.nickname_input.setPlaceholderText("Nickname (e.g. My Phone)")
         detect_row.addWidget(self.nickname_input)
 
-        self.save_device_btn = QPushButton("💾 Save Selected")
+        self.save_device_btn = self._icon_btn(QPushButton(" Save Selected"), "save", "white")
         self.save_device_btn.setProperty("cls", "primary")
         self.save_device_btn.clicked.connect(self._on_save_device)
         detect_row.addWidget(self.save_device_btn)
@@ -716,12 +786,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.saved_list)
 
         saved_row = QHBoxLayout()
-        self.connect_saved_btn = QPushButton("🔗 Connect")
+        self.connect_saved_btn = self._icon_btn(QPushButton(" Connect"), "link", "dim")
         self.connect_saved_btn.setProperty("cls", "secondary")
         self.connect_saved_btn.clicked.connect(self._on_connect_saved)
         saved_row.addWidget(self.connect_saved_btn)
 
-        self.remove_saved_btn = QPushButton("✕ Remove")
+        self.remove_saved_btn = self._icon_btn(QPushButton(" Remove"), "x", "destructive")
         self.remove_saved_btn.setProperty("cls", "destructive")
         self.remove_saved_btn.clicked.connect(self._on_remove_saved)
         saved_row.addWidget(self.remove_saved_btn)
@@ -824,12 +894,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.current_shortcut_label)
 
         find_row = QHBoxLayout()
-        find_shortcut_btn = QPushButton("⌨ Find Shortcut")
+        find_shortcut_btn = self._icon_btn(QPushButton(" Find Shortcut"), "keyboard", "white")
         find_shortcut_btn.setProperty("cls", "primary")
         find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
         find_row.addWidget(find_shortcut_btn)
 
-        clear_shortcut_btn = QPushButton("✕ Clear Shortcut")
+        clear_shortcut_btn = self._icon_btn(QPushButton(" Clear Shortcut"), "x", "dim")
         clear_shortcut_btn.setProperty("cls", "muted")
         clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
         find_row.addWidget(clear_shortcut_btn)
@@ -945,7 +1015,7 @@ class SettingsPanel(QWidget):
 
         nav_row.addStretch()
 
-        self.preview_settings_btn = QPushButton("⚙")
+        self.preview_settings_btn = self._icon_btn(QPushButton(), "settings", "faint")
         self.preview_settings_btn.setCheckable(True)
         self.preview_settings_btn.setChecked(True)
         self.preview_settings_btn.setEnabled(False)
@@ -954,17 +1024,17 @@ class SettingsPanel(QWidget):
 
         nav_row.addSpacing(12)
 
-        self.preview_min_btn = QPushButton("─")
+        self.preview_min_btn = self._icon_btn(QPushButton(), "minus", "faint")
         self.preview_min_btn.setFixedSize(44, 48)
         self.preview_min_btn.setEnabled(False)
         nav_row.addWidget(self.preview_min_btn)
 
-        self.preview_max_btn = QPushButton("☐")
+        self.preview_max_btn = self._icon_btn(QPushButton(), "square", "faint")
         self.preview_max_btn.setFixedSize(44, 48)
         self.preview_max_btn.setEnabled(False)
         nav_row.addWidget(self.preview_max_btn)
 
-        self.preview_close_btn = QPushButton("✕")
+        self.preview_close_btn = self._icon_btn(QPushButton(), "x", "faint")
         self.preview_close_btn.setFixedSize(44, 48)
         self.preview_close_btn.setEnabled(False)
         nav_row.addWidget(self.preview_close_btn)
@@ -1130,12 +1200,12 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.panel_customization_status_label)
 
         buttons_row = QHBoxLayout()
-        save_project_btn = QPushButton("💾 Save Project")
+        save_project_btn = self._icon_btn(QPushButton(" Save Project"), "save", "white")
         save_project_btn.setProperty("cls", "primary")
         save_project_btn.clicked.connect(self._on_save_project)
         buttons_row.addWidget(save_project_btn, 1)
 
-        clear_panels_btn = QPushButton("🗑 Clear Panels")
+        clear_panels_btn = self._icon_btn(QPushButton(" Clear Panels"), "trash-2", "destructive")
         clear_panels_btn.setProperty("cls", "destructive")
         clear_panels_btn.clicked.connect(self._on_clear_panels)
         buttons_row.addWidget(clear_panels_btn)

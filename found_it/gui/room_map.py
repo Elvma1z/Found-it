@@ -1,9 +1,24 @@
+import math
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush
+from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush, QPainterPath
 from typing import List, Tuple, Optional
 
 from found_it.utils.themes import get_palette
+
+
+def _facing_wedge_path(cx: int, cy: int, radius: int, facing_deg: float, steps: int = 24) -> QPainterPath:
+    """A 180 deg pie slice centered on facing_deg (0deg = +x, 90deg = +y,
+    matching the room's coordinate system), for drawing a camera's actual
+    field of view instead of implying it can see the whole room."""
+    path = QPainterPath()
+    path.moveTo(cx, cy)
+    facing_rad = math.radians(facing_deg)
+    for i in range(steps + 1):
+        ang = facing_rad - math.pi / 2 + math.pi * i / steps
+        path.lineTo(cx + radius * math.cos(ang), cy + radius * math.sin(ang))
+    path.closeSubpath()
+    return path
 
 
 class RoomMap(QWidget):
@@ -25,7 +40,6 @@ class RoomMap(QWidget):
         self.cameras: List[dict] = []
         self.room_width = 4.0
         self.room_height = 4.0
-        self.selected_item_id: Optional[int] = None
         self._padding = 40
         self.palette = get_palette("Indigo")
 
@@ -48,10 +62,6 @@ class RoomMap(QWidget):
 
     def update_items(self, items: List[dict]):
         self.items = items
-        self.update()
-
-    def select_item(self, item_id: Optional[int]):
-        self.selected_item_id = item_id
         self.update()
 
     def _color_for_camera(self, cam_id: int) -> QColor:
@@ -153,6 +163,14 @@ class RoomMap(QWidget):
                 painter.setBrush(Qt.NoBrush)
                 radius = min(room_px_w, room_px_h) // 2 - 10
                 painter.drawEllipse(cam_px - radius, cam_py - radius, radius * 2, radius * 2)
+            elif cam.get("is_180"):
+                # Only a half-circle wedge, not a full ring like 360° - this
+                # camera genuinely can't see the other half of the room, and
+                # the map should look like that's true.
+                radius = min(room_px_w, room_px_h) // 2 - 10
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 60), 1, Qt.DotLine))
+                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 20)))
+                painter.drawPath(_facing_wedge_path(cam_px, cam_py, radius, cam.get("facing_deg", 0.0)))
 
         for item in self.items:
             room_x = item.get("room_x", 0)
@@ -160,13 +178,9 @@ class RoomMap(QWidget):
             px, py = self._room_to_pixel(room_x, room_y)
 
             cam_id = item.get("camera_id", 0)
-            is_selected = item.get("id") == self.selected_item_id
-
             color = self._color_for_camera(cam_id)
-            if is_selected:
-                color = QColor(255, 255, 0)
 
-            pin_size = 12 if is_selected else 8
+            pin_size = 8
             painter.setPen(QPen(color, 2))
             painter.setBrush(QBrush(color))
             painter.drawEllipse(px - pin_size // 2, py - pin_size // 2,

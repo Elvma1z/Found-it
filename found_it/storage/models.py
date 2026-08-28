@@ -35,8 +35,10 @@ class RoomZone:
 
 def default_cameras() -> list:
     return [
-        {"id": 0, "label": "Camera 0", "enabled": True, "x": 0.3, "y": 0.3, "is_360": False},
-        {"id": 1, "label": "Camera 1", "enabled": True, "x": 3.7, "y": 3.7, "is_360": False},
+        {"id": 0, "label": "Camera 0", "enabled": True, "x": 0.3, "y": 0.3,
+         "is_360": False, "is_180": False, "facing_deg": 0.0},
+        {"id": 1, "label": "Camera 1", "enabled": True, "x": 3.7, "y": 3.7,
+         "is_360": False, "is_180": False, "facing_deg": 0.0},
     ]
 
 

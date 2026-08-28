@@ -62,6 +62,11 @@ class ItemDetector:
                 center_x = (x1 + x2) / 2 / w
                 center_y = (y1 + y2) / 2 / h
 
+                # zone_x/zone_y (the box's normalized center) are the only
+                # coords the room mapper uses to place this detection - bbox
+                # width/height are kept below for drawing/snapshotting only,
+                # deliberately not fed into position/distance logic (see
+                # ItemMapper._raw_pixel_to_room).
                 detections.append({
                     "label": label,
                     "confidence": conf,

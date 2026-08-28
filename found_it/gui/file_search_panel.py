@@ -14,6 +14,7 @@ from typing import List
 
 from found_it.fileindex.search import FileSearchEngine, SearchResult
 from found_it.gui.people_panel import PeopleGalleryWidget
+from found_it.gui.icons import get_icon, ICON_SIZE
 from found_it.utils.themes import get_palette, widget_qss, repolish
 from found_it.utils.os_open import open_file, open_containing_folder
 
@@ -38,6 +39,14 @@ class SearchTab(QWidget):
     def apply_theme(self, palette: dict):
         self.palette = palette
         self.setStyleSheet(widget_qss(palette))
+        self.search_btn.setIcon(get_icon("search", "#ffffff"))
+        self.image_search_btn.setIcon(get_icon("image", palette["text_dim"]))
+        self.add_folder_btn.setIcon(get_icon("plus", palette["text_dim"]))
+        self.cancel_scan_btn.setIcon(get_icon("x", "#e57373"))
+        self.add_image_btn.setIcon(get_icon("plus", palette["text_dim"]))
+        self.open_btn.setIcon(get_icon("file", palette["text_dim"]))
+        self.open_dir_btn.setIcon(get_icon("folder-open", palette["text_dim"]))
+        self._show_results()
         repolish(self)
 
     def _setup_ui(self):
@@ -62,12 +71,14 @@ class SearchTab(QWidget):
         self.search_input.returnPressed.connect(self._on_search)
         search_row.addWidget(self.search_input)
 
-        self.search_btn = QPushButton("🔍 Search")
+        self.search_btn = QPushButton(" Search")
+        self.search_btn.setIconSize(ICON_SIZE)
         self.search_btn.setProperty("cls", "primary")
         self.search_btn.clicked.connect(self._on_search)
         search_row.addWidget(self.search_btn)
 
-        self.image_search_btn = QPushButton("🖼 Search by Image")
+        self.image_search_btn = QPushButton(" Search by Image")
+        self.image_search_btn.setIconSize(ICON_SIZE)
         self.image_search_btn.setProperty("cls", "secondary")
         self.image_search_btn.setToolTip("Pick a picture and find visually similar indexed images")
         self.image_search_btn.clicked.connect(self._search_by_image)
@@ -96,7 +107,8 @@ class SearchTab(QWidget):
         self.folder_label.setProperty("cls", "muted")
         folder_row.addWidget(self.folder_label, 1)
 
-        self.add_folder_btn = QPushButton("+ Add Folder")
+        self.add_folder_btn = QPushButton(" Add Folder")
+        self.add_folder_btn.setIconSize(ICON_SIZE)
         self.add_folder_btn.setProperty("cls", "secondary")
         self.add_folder_btn.clicked.connect(self._add_folder)
         folder_row.addWidget(self.add_folder_btn)
@@ -113,13 +125,15 @@ class SearchTab(QWidget):
         self.scan_btn.clicked.connect(self._start_scan)
         folder_row.addWidget(self.scan_btn)
 
-        self.cancel_scan_btn = QPushButton("✕ Cancel")
+        self.cancel_scan_btn = QPushButton(" Cancel")
+        self.cancel_scan_btn.setIconSize(ICON_SIZE)
         self.cancel_scan_btn.setProperty("cls", "destructive")
         self.cancel_scan_btn.setEnabled(False)
         self.cancel_scan_btn.clicked.connect(self._cancel_scan)
         folder_row.addWidget(self.cancel_scan_btn)
 
-        self.add_image_btn = QPushButton("+ Add Image")
+        self.add_image_btn = QPushButton(" Add Image")
+        self.add_image_btn.setIconSize(ICON_SIZE)
         self.add_image_btn.setProperty("cls", "secondary")
         self.add_image_btn.clicked.connect(self._add_named_image)
         folder_row.addWidget(self.add_image_btn)
@@ -165,13 +179,15 @@ class SearchTab(QWidget):
         right_layout.addWidget(self.preview_label)
 
         btn_row = QHBoxLayout()
-        self.open_btn = QPushButton("📂 Open File")
+        self.open_btn = QPushButton(" Open File")
+        self.open_btn.setIconSize(ICON_SIZE)
         self.open_btn.setEnabled(False)
         self.open_btn.setProperty("cls", "secondary")
         self.open_btn.clicked.connect(self._open_file)
         btn_row.addWidget(self.open_btn)
 
-        self.open_dir_btn = QPushButton("📁 Open Folder")
+        self.open_dir_btn = QPushButton(" Open Folder")
+        self.open_dir_btn.setIconSize(ICON_SIZE)
         self.open_dir_btn.setEnabled(False)
         self.open_dir_btn.setProperty("cls", "secondary")
         self.open_dir_btn.clicked.connect(self._open_folder)
@@ -354,8 +370,8 @@ class SearchTab(QWidget):
         self.results_label.setText(f"Results ({len(self._results)})")
 
         for i, result in enumerate(self._results):
-            type_icon = {"image": "[IMG]", "code": "[CODE]", "text": "[TXT]"}.get(
-                result.file_type, "[?]"
+            icon_name = {"image": "image", "code": "code", "text": "file-text"}.get(
+                result.file_type, "file"
             )
             size_kb = result.size_bytes / 1024
             if size_kb > 1024:
@@ -364,9 +380,9 @@ class SearchTab(QWidget):
                 size_str = f"{size_kb:.0f} KB"
 
             score_pct = f"{result.score:.0%}"
-            text = f"{type_icon} {result.name}\n  {result.path}\n  {size_str} | Match: {score_pct}"
+            text = f"{result.name}\n  {result.path}\n  {size_str} | Match: {score_pct}"
 
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(get_icon(icon_name, self.palette["text_dim"]), text)
             item.setData(Qt.UserRole, i)
             self.results_list.addItem(item)
 
