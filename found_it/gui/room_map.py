@@ -4,7 +4,7 @@ from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush, QPainterPath
 from typing import List, Tuple, Optional
 
-from found_it.utils.themes import get_palette
+from found_it.utils.themes import get_palette, aura_brush
 
 
 def _facing_wedge_path(cx: int, cy: int, radius: int, facing_deg: float, steps: int = 24) -> QPainterPath:
@@ -104,7 +104,7 @@ class RoomMap(QWidget):
         room_rect = QRect(ox, oy, room_px_w, room_px_h)
 
         painter.setPen(QPen(QColor(p["border"]), 2))
-        painter.setBrush(QBrush(QColor(p["bg"])))
+        painter.setBrush(aura_brush(p, room_rect))
         painter.drawRoundedRect(room_rect, 6, 6)
 
         painter.setPen(QPen(QColor(p["border"]), 1, Qt.DashLine))

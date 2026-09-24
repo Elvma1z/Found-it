@@ -66,3 +66,8 @@ class AppSettings:
     title_hotkey_label: str = ""
     nav_tab_order: str = ""
     dock_panel_order: str = ""
+    # "" means this install has never been launched, which is what triggers
+    # the first-run tutorial. See load_app_settings for why an existing
+    # settings file without the key is treated as an upgrade instead.
+    last_seen_version: str = ""
+    tutorial_completed: bool = False

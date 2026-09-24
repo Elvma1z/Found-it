@@ -2,6 +2,7 @@ import json
 
 from found_it.config import DATA_DIR
 from found_it.storage.models import AppSettings
+from found_it.version import PRE_VERSIONING_VERSION
 
 
 SETTINGS_FILE = DATA_DIR / "app_settings.json"
@@ -25,6 +26,11 @@ def load_app_settings() -> AppSettings:
             title_hotkey_label=data.get("title_hotkey_label", defaults.title_hotkey_label),
             nav_tab_order=data.get("nav_tab_order", defaults.nav_tab_order),
             dock_panel_order=data.get("dock_panel_order", defaults.dock_panel_order),
+            # A settings file written before these keys existed belongs to
+            # someone already using the app, not to a fresh install - so
+            # they get release notes for what changed, not the tutorial.
+            last_seen_version=data.get("last_seen_version", PRE_VERSIONING_VERSION),
+            tutorial_completed=data.get("tutorial_completed", True),
         )
     return AppSettings()
 
@@ -44,6 +50,8 @@ def save_app_settings(settings: AppSettings):
         "title_hotkey_label": settings.title_hotkey_label,
         "nav_tab_order": settings.nav_tab_order,
         "dock_panel_order": settings.dock_panel_order,
+        "last_seen_version": settings.last_seen_version,
+        "tutorial_completed": settings.tutorial_completed,
     }
     with open(SETTINGS_FILE, "w") as f:
         json.dump(data, f, indent=2)

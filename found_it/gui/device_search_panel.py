@@ -12,14 +12,16 @@ from PyQt5.QtGui import QFont
 
 from found_it.device.device_scanner import DeviceScanner, DeviceSearchResult
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 from found_it.utils.themes import get_palette, widget_qss, repolish
 
 
-class DeviceSearchPanel(QWidget):
+class DeviceSearchPanel(QWidget, HelpInfoMixin):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.scanner = DeviceScanner()
         self.palette = get_palette("Indigo")
+        self._init_help_info()
         self._setup_ui()
         self._setup_timer()
         self.apply_theme(self.palette)
@@ -30,6 +32,7 @@ class DeviceSearchPanel(QWidget):
         self.connect_btn.setIcon(get_icon("link", palette["text_dim"]))
         self.disconnect_btn.setIcon(get_icon("unlink", "#e57373"))
         self.search_btn.setIcon(get_icon("search", "#ffffff"))
+        self._apply_help_theme(palette)
         self._show_results()
         repolish(self)
 
@@ -38,10 +41,14 @@ class DeviceSearchPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
+        title_row = QHBoxLayout()
         title = QLabel("Other Devices")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._make_info_toggle())
+        layout.addLayout(title_row)
 
         desc = QLabel("Connect a device via USB-C and search its files")
         desc.setProperty("cls", "muted")
@@ -88,6 +95,13 @@ class DeviceSearchPanel(QWidget):
         conn_row.addWidget(self.disconnect_btn)
 
         layout.addLayout(conn_row)
+        self._add_help(
+            None,
+            "Connect a phone or tablet over USB-C with debugging enabled, then "
+            "click Connect. Once connected, Scan Device indexes its files so "
+            "you can search them the same way as files on this PC.",
+            layout=layout,
+        )
 
         self.device_label = QLabel("")
         self.device_label.setProperty("cls", "status")

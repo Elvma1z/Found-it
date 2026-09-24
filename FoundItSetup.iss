@@ -3,7 +3,7 @@
 ; Produces dist311-onefile\..\installer\FoundIt-Setup.exe
 
 #define MyAppName "Found It"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Found It"
 #define MyAppExeName "FoundIt.exe"
 

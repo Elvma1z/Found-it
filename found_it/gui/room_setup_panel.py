@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QListWidget, QListWidgetItem, QLabel,
     QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
     QInputDialog, QMessageBox, QMenu, QScrollArea,
-    QMainWindow, QDockWidget, QSizePolicy
+    QMainWindow, QDockWidget, QSizePolicy, QFormLayout
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QByteArray, QPointF, QRectF
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QBrush, QPolygonF
@@ -13,12 +13,13 @@ from typing import List, Optional, Tuple
 
 from found_it.gui.room_map import _facing_wedge_path
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 
 from found_it.utils.room_profiles import load_room_profiles, save_room_profiles
 from found_it.storage.database import Database
 from found_it.storage.models import RoomConfig
 from found_it.detection.item_mapper import ItemMapper
-from found_it.utils.themes import get_palette, widget_qss, repolish
+from found_it.utils.themes import get_palette, widget_qss, repolish, aura_brush
 from found_it.utils.app_settings import load_app_settings, save_app_settings
 
 # Real-world footprints (width_m, depth_m) for COCO labels worth auto-placing
@@ -525,7 +526,7 @@ class RoomCanvas(QWidget):
         ox, oy, room_px_w, room_px_h = int(ox), int(oy), int(room_px_w), int(room_px_h)
 
         painter.setPen(QPen(QColor(p["border"]), 2))
-        painter.setBrush(QBrush(QColor(p["bg"])))
+        painter.setBrush(aura_brush(p, QRectF(ox, oy, room_px_w, room_px_h)))
         painter.drawRoundedRect(ox, oy, room_px_w, room_px_h, 6, 6)
 
         painter.setPen(QPen(QColor(p["border"]), 1, Qt.DashLine))
@@ -783,93 +784,64 @@ class RoomCanvas(QWidget):
 
 
 # Room Setup's panels are pinned the same way Room Tracker's are: no Movable,
-# no Floatable. Collapsing (the arrow in each title bar) and hiding via the
-# View menu still work - neither moves a panel out of its slot. Rearranging
+# no Floatable. Collapsing a sidebar section and hiding the sidebar via the
+# Panels menu still work - neither moves a panel out of its slot. Rearranging
 # happens in Settings > Customization.
 LOCKED_DOCK_FEATURES = QDockWidget.DockWidgetClosable
 
 
-class _CollapsibleDockTitle(QWidget):
-    """Custom title bar for a sidebar dock: click the arrow to collapse the
-    dock down to just this header, freeing up vertical space for its
-    siblings instead of every dock fighting over a fixed-size split (which
-    is what made their button rows overlap). The rest of the bar is inert -
-    docks are locked in place (LOCKED_DOCK_FEATURES) outside Customization."""
+class _CollapsibleSection(QFrame):
+    """One titled card in Room Setup's settings sidebar. Click the header to
+    fold the card down to just its title. The cards sit one after another
+    inside a single scroll area, so each keeps its natural height and the
+    sidebar scrolls as a whole - instead of every section being its own dock
+    squeezed into a fixed share of the column with its own scrollbar."""
 
-    def __init__(self, title: str, dock: QDockWidget, dock_host: QMainWindow, parent=None):
+    def __init__(self, title: str, parent=None):
         super().__init__(parent)
-        self.dock = dock
-        self.dock_host = dock_host
+        self.setProperty("cls", "section")
         self._expanded = True
         self._palette = {}
-        self._last_expanded_height: Optional[int] = None
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 5, 8, 5)
-        layout.setSpacing(6)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.toggle_btn = QPushButton()
-        self.toggle_btn.setIconSize(ICON_SIZE)
-        self.toggle_btn.setFlat(True)
-        self.toggle_btn.setFixedWidth(18)
-        self.toggle_btn.setCursor(Qt.PointingHandCursor)
-        self.toggle_btn.clicked.connect(self.toggle)
-        layout.addWidget(self.toggle_btn)
+        self.header_btn = QPushButton(title)
+        self.header_btn.setObjectName("section_header")
+        self.header_btn.setIconSize(ICON_SIZE)
+        self.header_btn.setCursor(Qt.PointingHandCursor)
+        self.header_btn.clicked.connect(self.toggle)
+        layout.addWidget(self.header_btn)
 
-        self.title_label = QLabel(title)
-        self.title_label.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self.title_label.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.title_label)
-        layout.addStretch()
-
-    def mousePressEvent(self, event):
-        # Clicking the title text (not just the arrow) also toggles - only
-        # the empty stretch area is left free for the native drag handle.
-        if event.button() == Qt.LeftButton and self.title_label.geometry().contains(event.pos()):
-            self.toggle()
-            return
-        super().mousePressEvent(event)
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(12, 2, 12, 12)
+        self.body_layout.setSpacing(8)
+        layout.addWidget(self.body)
 
     def toggle(self):
-        # Constraining the dock's max height (not hiding its content widget)
-        # is deliberate - QMainWindow's dock layout recomputes the whole
-        # sidebar column's width off of each dock's *visible* size hint, so
-        # hiding a dock's content instead of just capping its height was
-        # collapsing the entire sidebar's width along with it.
         self._expanded = not self._expanded
-        self.toggle_btn.setIcon(get_icon(
+        self.body.setVisible(self._expanded)
+        self._update_icon()
+
+    def _update_icon(self):
+        self.header_btn.setIcon(get_icon(
             "chevron-down" if self._expanded else "chevron-right",
             self._palette.get("text", "#e0e0e0"),
         ))
-        header_h = self.sizeHint().height()
-
-        if self._expanded:
-            self.dock.setMaximumHeight(16777215)
-            # Removing the max height cap doesn't by itself make the dock
-            # grow back - the splitter just leaves it at its collapsed size
-            # until something asks for more, which is why reopening a
-            # section wasn't pushing the ones below it back down. Explicitly
-            # resizing it back to (roughly) what it was before forces that
-            # redistribution.
-            target = self._last_expanded_height or max(header_h * 6, 200)
-            self.dock_host.resizeDocks([self.dock], [target], Qt.Vertical)
-        else:
-            if self.dock.height() > header_h:
-                self._last_expanded_height = self.dock.height()
-            self.dock.setMaximumHeight(header_h)
-            self.dock_host.resizeDocks([self.dock], [header_h], Qt.Vertical)
 
     def apply_theme(self, p: dict):
         self._palette = p
-        self.setStyleSheet(
-            f"background: {p['header']}; "
-            f"border-top: 1px solid {p['border']}; border-bottom: 1px solid {p['border']};"
-        )
-        self.title_label.setStyleSheet(f"color: {p['text']}; background: transparent;")
-        self.toggle_btn.setStyleSheet("""
-            QPushButton { border: none; background: transparent; }
+        self.header_btn.setStyleSheet(f"""
+            QPushButton#section_header {{
+                text-align: left; border: none; background: transparent;
+                color: {p['text']}; font-size: 13px; font-weight: bold;
+                padding: 10px 12px;
+            }}
+            QPushButton#section_header:hover {{ color: {p['accent']}; }}
         """)
-        self.toggle_btn.setIcon(get_icon("chevron-down" if self._expanded else "chevron-right", p["text"]))
+        self._update_icon()
 
 
 class _HeightRequiredSplash(QWidget):
@@ -972,7 +944,7 @@ class _HeightRequiredSplash(QWidget):
         self.raise_()
 
 
-class RoomSetupPanel(QWidget):
+class RoomSetupPanel(QWidget, HelpInfoMixin):
     """Lets the user size their room, lay out named zones/furniture, and rename detected objects."""
 
     room_updated = pyqtSignal()
@@ -984,6 +956,7 @@ class RoomSetupPanel(QWidget):
         self.zones: List[dict] = [dict(z) for z in self.profiles[0].zones]
         self.cameras: List[dict] = [dict(c) for c in self.profiles[0].cameras]
         self.palette = get_palette("Indigo")
+        self._init_help_info()
         self._setup_ui()
         self._refresh_profile_list()
         self._load_from_config()
@@ -1001,37 +974,41 @@ class RoomSetupPanel(QWidget):
         # a slightly bigger click/read target here. Qt rounds QSS padding to
         # whole pixels per side, so 6.5px (vs. the shared 6px) is the
         # smallest step that actually renders taller instead of rounding away.
-        self.setStyleSheet(widget_qss(palette) + """
-            QListWidget::item { padding: 6.5px 6px; }
+        self.setStyleSheet(widget_qss(palette) + f"""
+            QListWidget::item {{ padding: 6.5px 6px; }}
+            QFrame[cls="section"] {{
+                background-color: {p['panel']}; border: 1px solid {p['border']}; border-radius: 8px;
+            }}
         """)
         repolish(self)
         self.canvas.apply_theme(palette)
         self._height_splash.apply_theme(palette)
 
         self.dock_host.setStyleSheet(f"""
-            QMainWindow {{ background-color: {p['bg']}; }}
-            QMainWindow::separator {{ background: {p['bg']}; width: 6px; height: 6px; }}
-            QMainWindow::separator:hover {{ background: {p['accent']}; }}
+            QMainWindow {{ background: {p['bg_grad']}; }}
+            QMainWindow::separator {{ background: transparent; width: 6px; height: 6px; }}
+            QMainWindow::separator:hover {{ background: {p['accent_grad']}; }}
             QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
-            QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
+            QDockWidget::title {{ background: {p['header_grad']}; padding: 6px 8px; border-bottom: 1px solid {p['glow_line']}; }}
             QTabBar {{ background: {p['header']}; }}
             QTabBar::tab {{
                 background: {p['panel']}; color: {p['text_dim']};
                 padding: 6px 16px; border: 1px solid {p['border']};
                 border-bottom: none; border-radius: 4px 4px 0 0;
             }}
-            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:selected {{ background: {p['selected_grad']}; color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
             QTabBar::tab:hover {{ color: {p['text']}; }}
             QMenuBar {{ background: {p['header']}; color: {p['text_dim']}; border-bottom: 1px solid {p['border']}; }}
             QMenuBar::item {{ padding: 4px 10px; }}
-            QMenuBar::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
-            QMenu {{ background: {p['panel']}; color: {p['text_dim']}; border: 1px solid {p['border']}; }}
-            QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QMenuBar::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
+            QMenu {{ background: {p['panel_grad']}; color: {p['text_dim']}; border: 1px solid {p['glow']}; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
         """)
 
-        self.zones_title.apply_theme(p)
-        self.drawers_title.apply_theme(p)
-        self.objects_title.apply_theme(p)
+        for section in self._sidebar_sections:
+            section.apply_theme(p)
+
+        self._apply_help_theme(p)
 
     # Bump this whenever the dock set changes (widgets added/removed, or a
     # dock gets a custom title bar) - restoreState() rejects a saved layout
@@ -1039,7 +1016,7 @@ class RoomSetupPanel(QWidget):
     # computed for a different set of docks, which is what squeezed the
     # sidebar down to a sliver after the Cameras dock was removed but the
     # old saved layout (still describing 4 docks) got restored anyway.
-    _DOCK_LAYOUT_VERSION = 2
+    _DOCK_LAYOUT_VERSION = 3
 
     def _restore_layout(self):
         state_b64 = load_app_settings().room_setup_layout
@@ -1090,10 +1067,14 @@ class RoomSetupPanel(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(10)
 
+        title_row = QHBoxLayout()
         title = QLabel("Room Setup")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
-        outer.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._make_info_toggle())
+        outer.addLayout(title_row)
 
         desc = QLabel("Set a room's size, sketch out zones like the bed or desk, and rename detected objects. "
                        "Use \"New Room\" to add another room profile, or \"Rename\" to rename this one.")
@@ -1142,15 +1123,14 @@ class RoomSetupPanel(QWidget):
         profile_row.addWidget(self.delete_room_btn)
         left_layout.addLayout(profile_row)
 
-        profile_hint = QLabel(
+        self._add_help(
+            None,
             "Every saved room tracks its own cameras in the background at the same time, "
             "even while you're viewing a different one - so each room needs cameras with "
             "their own distinct IDs. Switch which one you're viewing from the \"Main Room\" "
-            "button in Room Tracker."
+            "button in Room Tracker.",
+            layout=left_layout,
         )
-        profile_hint.setProperty("cls", "hint")
-        profile_hint.setWordWrap(True)
-        left_layout.addWidget(profile_hint)
 
         dims_row = QHBoxLayout()
         dims_row.setSpacing(8)
@@ -1193,14 +1173,13 @@ class RoomSetupPanel(QWidget):
         self.view_mode_hint.setWordWrap(True)
         left_layout.addWidget(self.view_mode_hint)
 
-        camera_hint = QLabel(
+        self._add_help(
+            None,
             "Add, rename, or remove cameras from the Cameras tab. Once a camera's added, "
             "drag its marker below to place it where it actually sits in the room - click "
-            "a marker to select it, then press Delete to take it out."
+            "a marker to select it, then press Delete to take it out.",
+            layout=left_layout,
         )
-        camera_hint.setProperty("cls", "hint")
-        camera_hint.setWordWrap(True)
-        left_layout.addWidget(camera_hint)
 
         self.canvas = RoomCanvas()
         self.canvas.zone_drawn.connect(self._on_zone_drawn)
@@ -1224,84 +1203,102 @@ class RoomSetupPanel(QWidget):
         left_scroll.setWidget(left)
         self.dock_host.setCentralWidget(left_scroll)
 
-        # --- Zones / Furniture panel ---
-        zones_widget = QWidget()
-        right_layout = QVBoxLayout(zones_widget)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-        right_layout.setSpacing(10)
+        # --- Settings sidebar: one dock, one scrollbar ---
+        # Zones / Furniture, Drawers and Detected Objects used to be three
+        # separate docks stacked in the right column, each fighting for a
+        # fixed slice of its height with its own little scrollbar. They are
+        # now collapsible cards in a single scroll area, so every control
+        # gets the room it needs and the whole sidebar scrolls together.
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(4, 4, 8, 4)
+        sidebar_layout.setSpacing(12)
 
-        zones_hint = QLabel("Drag a zone on the room to move it, or drag its top-left corner handle to resize it. "
-                             "With a zone selected: Delete removes it, Ctrl+R rotates it 90°.")
+        # --- Zones / Furniture ---
+        self.zones_section = _CollapsibleSection("Zones / Furniture")
+        body = self.zones_section.body_layout
+
+        zones_hint = QLabel("Drag a zone on the room to move it, or its top-left handle to resize it. "
+                            "With one selected, Delete removes it and Ctrl+R rotates it 90°.")
         zones_hint.setProperty("cls", "hint")
         zones_hint.setWordWrap(True)
-        right_layout.addWidget(zones_hint)
+        body.addWidget(zones_hint)
 
-        scan_row = QHBoxLayout()
-        scan_row.setSpacing(8)
         self.scan_room_btn = QPushButton("Scan Room with Cameras")
         self.scan_room_btn.setProperty("cls", "secondary")
+        self.scan_room_btn.setToolTip(
+            "Auto-creates zones for furniture the cameras currently recognize (bed, couch, "
+            "chair, TV, etc.) at their mapped position. Sizes are estimates since a camera "
+            "can't measure true dimensions - reposition/resize by hand afterward."
+        )
         self.scan_room_btn.clicked.connect(self._on_scan_room)
-        scan_row.addWidget(self.scan_room_btn)
-        right_layout.addLayout(scan_row)
+        body.addWidget(self.scan_room_btn)
 
-        scan_hint = QLabel("Auto-creates zones for furniture the cameras currently recognize (bed, couch, chair, TV, etc.) at their mapped position. Sizes are estimates since a camera can't measure true dimensions - reposition/resize by hand afterward. Add cameras and enable them first.")
+        scan_hint = QLabel("Adds the furniture your enabled cameras can see. Sizes are estimates - adjust them afterward.")
         scan_hint.setProperty("cls", "hint")
         scan_hint.setWordWrap(True)
-        right_layout.addWidget(scan_hint)
+        body.addWidget(scan_hint)
 
         add_row = QHBoxLayout()
         add_row.setSpacing(8)
         self.zone_name_input = QLineEdit()
         self.zone_name_input.setPlaceholderText("e.g. Bed, Desk, Closet")
-        add_row.addWidget(self.zone_name_input)
+        add_row.addWidget(self.zone_name_input, 1)
 
         self.draw_zone_btn = QPushButton("Draw Zone")
         self.draw_zone_btn.setCheckable(True)
         self.draw_zone_btn.setProperty("cls", "secondary")
         self.draw_zone_btn.clicked.connect(self._on_draw_zone_clicked)
         add_row.addWidget(self.draw_zone_btn)
-        right_layout.addLayout(add_row)
+        body.addLayout(add_row)
 
         self.zone_list = QListWidget()
-        self.zone_list.setMinimumHeight(80)
+        self.zone_list.setMinimumHeight(120)
+        self.zone_list.setMaximumHeight(220)
         self.zone_list.itemClicked.connect(self._on_zone_list_clicked)
-        right_layout.addWidget(self.zone_list)
+        body.addWidget(self.zone_list)
 
         rename_row = QHBoxLayout()
         rename_row.setSpacing(8)
         self.zone_rename_input = QLineEdit()
         self.zone_rename_input.setPlaceholderText("Rename selected zone")
-        rename_row.addWidget(self.zone_rename_input)
+        rename_row.addWidget(self.zone_rename_input, 1)
 
         self.rename_zone_btn = QPushButton("Rename")
         self.rename_zone_btn.setProperty("cls", "primary")
         self.rename_zone_btn.clicked.connect(self._on_rename_zone)
         rename_row.addWidget(self.rename_zone_btn)
+        body.addLayout(rename_row)
 
+        zone_action_row = QHBoxLayout()
+        zone_action_row.setSpacing(8)
         self.rotate_zone_btn = QPushButton("Rotate 90°")
         self.rotate_zone_btn.setProperty("cls", "secondary")
         self.rotate_zone_btn.clicked.connect(self._on_rotate_zone)
-        rename_row.addWidget(self.rotate_zone_btn)
+        zone_action_row.addWidget(self.rotate_zone_btn, 1)
 
         self.delete_zone_btn = QPushButton("Delete")
         self.delete_zone_btn.setProperty("cls", "secondary")
         self.delete_zone_btn.clicked.connect(self._on_delete_zone)
-        rename_row.addWidget(self.delete_zone_btn)
-        right_layout.addLayout(rename_row)
+        zone_action_row.addWidget(self.delete_zone_btn, 1)
+        body.addLayout(zone_action_row)
 
         settings_sep = QFrame()
         settings_sep.setFrameShape(QFrame.HLine)
         settings_sep.setProperty("cls", "sep")
-        right_layout.addWidget(settings_sep)
+        body.addWidget(settings_sep)
 
         self.zone_settings_label = QLabel("Select a piece of furniture to edit its settings")
         self.zone_settings_label.setProperty("cls", "muted")
         self.zone_settings_label.setWordWrap(True)
-        right_layout.addWidget(self.zone_settings_label)
+        body.addWidget(self.zone_settings_label)
 
-        type_row = QHBoxLayout()
-        type_row.setSpacing(8)
-        type_row.addWidget(self._label("Type"))
+        zone_form = QFormLayout()
+        zone_form.setHorizontalSpacing(10)
+        zone_form.setVerticalSpacing(8)
+        zone_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        zone_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         self.zone_type_input = QComboBox()
         self.zone_type_input.addItems(FURNITURE_TYPES)
         self.zone_type_input.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -1309,14 +1306,10 @@ class RoomSetupPanel(QWidget):
         self.zone_type_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.zone_type_input.setEnabled(False)
         self.zone_type_input.currentIndexChanged.connect(self._on_zone_type_changed)
-        type_row.addWidget(self.zone_type_input, 1)
-        right_layout.addLayout(type_row)
+        zone_form.addRow(self._label("Type"), self.zone_type_input)
 
-        height_row = QHBoxLayout()
-        height_row.setSpacing(8)
         # Inches rather than feet: furniture is measured in them ("a 32 inch
         # dresser"), and decimal feet would make every value a fraction.
-        height_row.addWidget(self._label("Height (in)"))
         self.zone_height_input = QDoubleSpinBox()
         self.zone_height_input.setRange(0.0, m_to_in(5.0))
         self.zone_height_input.setSingleStep(1.0)
@@ -1327,50 +1320,33 @@ class RoomSetupPanel(QWidget):
         self.zone_height_input.setSpecialValueText("Not set")
         self.zone_height_input.setEnabled(False)
         self.zone_height_input.valueChanged.connect(self._on_zone_height_changed)
-        height_row.addWidget(self.zone_height_input, 1)
-        right_layout.addLayout(height_row)
+        zone_form.addRow(self._label("Height"), self.zone_height_input)
+
+        self.zone_notes_input = QLineEdit()
+        self.zone_notes_input.setPlaceholderText("e.g. \"Kids' clothes\", \"keep unlocked\"")
+        self.zone_notes_input.setEnabled(False)
+        self.zone_notes_input.editingFinished.connect(self._on_zone_notes_changed)
+        zone_form.addRow(self._label("Notes"), self.zone_notes_input)
+        body.addLayout(zone_form)
 
         height_hint = QLabel(
-            "How tall this piece stands off the floor - a bed is roughly 24 in, a dresser "
-            "32 in, a desk 30 in, a wardrobe 78 in. The 3D view needs one on every piece "
-            "before it will open."
+            "Height is floor to top - roughly 24 in for a bed, 30 in for a desk, 32 in for "
+            "a dresser. The 3D view needs one on every piece."
         )
         height_hint.setProperty("cls", "hint")
         height_hint.setWordWrap(True)
-        right_layout.addWidget(height_hint)
+        body.addWidget(height_hint)
+        sidebar_layout.addWidget(self.zones_section)
 
-        self.zone_notes_input = QLineEdit()
-        self.zone_notes_input.setPlaceholderText("Notes (e.g. \"Kids' clothes\", \"keep unlocked\")")
-        self.zone_notes_input.setEnabled(False)
-        self.zone_notes_input.editingFinished.connect(self._on_zone_notes_changed)
-        right_layout.addWidget(self.zone_notes_input)
+        # --- Drawers ---
+        self.drawers_section = _CollapsibleSection("Drawers")
+        body = self.drawers_section.body_layout
 
-        right_layout.addStretch()
-
-        zones_scroll = QScrollArea()
-        zones_scroll.setWidgetResizable(True)
-        zones_scroll.setFrameShape(QFrame.NoFrame)
-        zones_scroll.setWidget(zones_widget)
-
-        self.zones_dock = QDockWidget("Zones / Furniture", self.dock_host)
-        self.zones_dock.setObjectName("zones_dock")
-        self.zones_dock.setWidget(zones_scroll)
-        self.zones_dock.setFeatures(LOCKED_DOCK_FEATURES)
-        self.zones_title = _CollapsibleDockTitle("Zones / Furniture", self.zones_dock, self.dock_host)
-        self.zones_dock.setTitleBarWidget(self.zones_title)
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.zones_dock)
-        view_menu.addAction(self.zones_dock.toggleViewAction())
-
-        # --- Drawers panel ---
-        drawers_widget = QWidget()
-        right_layout = QVBoxLayout(drawers_widget)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-        right_layout.setSpacing(10)
-
-        drawers_hint = QLabel("Has drawers? Select a zone above (e.g. Dresser) and split it into named compartments so the app can be specific about which one an object was put in.")
+        drawers_hint = QLabel("Select a zone above (e.g. Dresser) and split it into named drawers, "
+                              "so a find can say which one an object went into.")
         drawers_hint.setProperty("cls", "hint")
         drawers_hint.setWordWrap(True)
-        right_layout.addWidget(drawers_hint)
+        body.addWidget(drawers_hint)
 
         drawer_config_row = QHBoxLayout()
         drawer_config_row.setSpacing(8)
@@ -1386,102 +1362,94 @@ class RoomSetupPanel(QWidget):
         self.drawer_orientation_input.setMinimumContentsLength(6)
         self.drawer_orientation_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         drawer_config_row.addWidget(self.drawer_orientation_input, 1)
+        body.addLayout(drawer_config_row)
 
         self.set_drawers_btn = QPushButton("Set Drawers")
         self.set_drawers_btn.setProperty("cls", "secondary")
-        self.set_drawers_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.set_drawers_btn.clicked.connect(self._on_set_drawers)
-        drawer_config_row.addWidget(self.set_drawers_btn)
-        right_layout.addLayout(drawer_config_row)
+        body.addWidget(self.set_drawers_btn)
 
         self.drawer_list = QListWidget()
-        self.drawer_list.setMinimumHeight(50)
-        self.drawer_list.setMaximumHeight(90)
+        self.drawer_list.setMinimumHeight(60)
+        self.drawer_list.setMaximumHeight(140)
         self.drawer_list.itemClicked.connect(self._on_drawer_list_clicked)
-        right_layout.addWidget(self.drawer_list)
+        body.addWidget(self.drawer_list)
 
         drawer_rename_row = QHBoxLayout()
         drawer_rename_row.setSpacing(8)
         self.drawer_rename_input = QLineEdit()
         self.drawer_rename_input.setPlaceholderText("Rename selected drawer (e.g. Top Drawer)")
-        drawer_rename_row.addWidget(self.drawer_rename_input)
+        drawer_rename_row.addWidget(self.drawer_rename_input, 1)
 
         self.rename_drawer_btn = QPushButton("Rename")
         self.rename_drawer_btn.setProperty("cls", "primary")
         self.rename_drawer_btn.clicked.connect(self._on_rename_drawer)
         drawer_rename_row.addWidget(self.rename_drawer_btn)
-        right_layout.addLayout(drawer_rename_row)
-        right_layout.addStretch()
+        body.addLayout(drawer_rename_row)
+        sidebar_layout.addWidget(self.drawers_section)
 
-        drawers_scroll = QScrollArea()
-        drawers_scroll.setWidgetResizable(True)
-        drawers_scroll.setFrameShape(QFrame.NoFrame)
-        drawers_scroll.setWidget(drawers_widget)
-
-        self.drawers_dock = QDockWidget("Drawers", self.dock_host)
-        self.drawers_dock.setObjectName("drawers_dock")
-        self.drawers_dock.setWidget(drawers_scroll)
-        self.drawers_dock.setFeatures(LOCKED_DOCK_FEATURES)
-        self.drawers_title = _CollapsibleDockTitle("Drawers", self.drawers_dock, self.dock_host)
-        self.drawers_dock.setTitleBarWidget(self.drawers_title)
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.drawers_dock)
-        view_menu.addAction(self.drawers_dock.toggleViewAction())
-
-        # --- Detected Objects panel ---
-        objects_widget = QWidget()
-        right_layout = QVBoxLayout(objects_widget)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-        right_layout.setSpacing(10)
+        # --- Detected Objects ---
+        self.objects_section = _CollapsibleSection("Detected Objects")
+        body = self.objects_section.body_layout
 
         self.object_list = QListWidget()
-        self.object_list.setMinimumHeight(80)
+        self.object_list.setMinimumHeight(120)
+        self.object_list.setMaximumHeight(240)
         self.object_list.itemClicked.connect(self._on_object_list_clicked)
-        right_layout.addWidget(self.object_list)
+        body.addWidget(self.object_list)
 
         object_row = QHBoxLayout()
         object_row.setSpacing(8)
         self.object_rename_input = QLineEdit()
         self.object_rename_input.setPlaceholderText("Rename selected object")
-        object_row.addWidget(self.object_rename_input)
+        object_row.addWidget(self.object_rename_input, 1)
 
         self.rename_object_btn = QPushButton("Rename")
         self.rename_object_btn.setProperty("cls", "primary")
         self.rename_object_btn.clicked.connect(self._on_rename_object)
         object_row.addWidget(self.rename_object_btn)
+        body.addLayout(object_row)
 
-        self.refresh_objects_btn = QPushButton("Refresh")
+        self.refresh_objects_btn = QPushButton("Refresh List")
         self.refresh_objects_btn.setProperty("cls", "secondary")
         self.refresh_objects_btn.clicked.connect(self._refresh_object_list)
-        object_row.addWidget(self.refresh_objects_btn)
-        right_layout.addLayout(object_row)
-        right_layout.addStretch()
+        body.addWidget(self.refresh_objects_btn)
+        sidebar_layout.addWidget(self.objects_section)
 
-        objects_scroll = QScrollArea()
-        objects_scroll.setWidgetResizable(True)
-        objects_scroll.setFrameShape(QFrame.NoFrame)
-        objects_scroll.setWidget(objects_widget)
+        sidebar_layout.addStretch()
 
-        self.objects_dock = QDockWidget("Detected Objects", self.dock_host)
-        self.objects_dock.setObjectName("objects_dock")
-        self.objects_dock.setWidget(objects_scroll)
-        self.objects_dock.setFeatures(LOCKED_DOCK_FEATURES)
-        self.objects_title = _CollapsibleDockTitle("Detected Objects", self.objects_dock, self.dock_host)
-        self.objects_dock.setTitleBarWidget(self.objects_title)
-        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.objects_dock)
-        view_menu.addAction(self.objects_dock.toggleViewAction())
+        # Wrap long rows (e.g. a zone's coordinates) rather than giving each
+        # list its own horizontal scrollbar inside the sidebar's scroll.
+        for lst in (self.zone_list, self.drawer_list, self.object_list):
+            lst.setWordWrap(True)
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Zones/Drawers/Detected Objects are independent dock panels - collapse
-        # them from their title bar, drag an edge to resize, or hide them
-        # (reopen via the "Panels" menu). Where they sit is fixed here and
-        # changed only in Settings > Customization, which is why they are
-        # exposed as _room_docks - that screen pulls each one out to its
-        # sidebar individually.
-        self._room_docks: List[QDockWidget] = [
-            self.zones_dock, self.drawers_dock, self.objects_dock,
+        self._sidebar_sections: List[_CollapsibleSection] = [
+            self.zones_section, self.drawers_section, self.objects_section,
         ]
-        for dock in self._room_docks:
-            dock.setMinimumWidth(260)
-        self.dock_host.resizeDocks(self._room_docks, [320] * len(self._room_docks), Qt.Horizontal)
+
+        # The vertical scrollbar is always shown (not just on overflow) so it
+        # is obvious at a glance that the sidebar scrolls.
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setWidget(sidebar)
+
+        self.settings_dock = QDockWidget("Room Settings", self.dock_host)
+        self.settings_dock.setObjectName("room_settings_dock")
+        self.settings_dock.setWidget(sidebar_scroll)
+        self.settings_dock.setFeatures(LOCKED_DOCK_FEATURES)
+        self.dock_host.addDockWidget(Qt.RightDockWidgetArea, self.settings_dock)
+        view_menu.addAction(self.settings_dock.toggleViewAction())
+
+        # Where the sidebar sits is fixed here and changed only in Settings >
+        # Customization, which is why it is exposed via _room_docks - that
+        # screen pulls each dock out to its own sidebar individually.
+        self._room_docks: List[QDockWidget] = [self.settings_dock]
+        self.settings_dock.setMinimumWidth(300)
+        self.dock_host.resizeDocks(self._room_docks, [360], Qt.Horizontal)
 
         # "Save Room" stays outside the dock area, always reachable no
         # matter how the panels get rearranged.

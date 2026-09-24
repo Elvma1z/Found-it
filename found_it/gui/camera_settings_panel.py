@@ -15,6 +15,7 @@ from found_it.camera.capture import CameraDiscovery
 from found_it.utils.themes import get_palette, widget_qss, repolish
 from found_it.gui.camera_view import CameraView
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 
 CAMERA_TYPES = ["Standard", "180°", "360°"]
 GRID_COLUMNS = 3  # reference column count TILE_SCALE is measured against
@@ -155,7 +156,7 @@ class AddCameraTile(QFrame):
         super().mousePressEvent(event)
 
 
-class CameraSettingsPanel(QWidget):
+class CameraSettingsPanel(QWidget, HelpInfoMixin):
     # Emitted whenever a camera is added/renamed/toggled/removed and saved,
     # or the detection settings are saved - main_window uses this to refresh
     # everything else that reads room profiles / app settings (Room Setup's
@@ -190,6 +191,7 @@ class CameraSettingsPanel(QWidget):
         # updated while the grid is showing, and vice versa.
         self.live_views: Dict[int, CameraView] = {}
 
+        self._init_help_info()
         self._setup_ui()
         self._refresh_profile_list()
         self._refresh_camera_grid()
@@ -225,6 +227,7 @@ class CameraSettingsPanel(QWidget):
         if hasattr(self, "add_tile"):
             self.add_tile.apply_theme(palette)
         self.detail_view.apply_theme(palette)
+        self._apply_help_theme(palette)
         repolish(self)
 
     def showEvent(self, event):
@@ -299,10 +302,14 @@ class CameraSettingsPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
+        title_row = QHBoxLayout()
         title = QLabel("Cameras")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._make_info_toggle())
+        layout.addLayout(title_row)
 
         desc = QLabel(
             "Add, discover, or enable/disable cameras below. Click a camera's tile to open "
@@ -321,29 +328,27 @@ class CameraSettingsPanel(QWidget):
         profile_row.addWidget(self.profile_selector, 1)
         layout.addLayout(profile_row)
 
-        profile_hint = QLabel(
+        self._add_help(
+            None,
             "Every saved room tracks its own cameras, so each room needs cameras with "
             "their own distinct IDs. Rooms themselves are created/renamed from the "
-            "Room Setup tab."
+            "Room Setup tab.",
+            layout=layout,
         )
-        profile_hint.setProperty("cls", "hint")
-        profile_hint.setWordWrap(True)
-        layout.addWidget(profile_hint)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setProperty("cls", "sep")
         layout.addWidget(sep)
 
-        grid_hint = QLabel(
+        self._add_help(
+            None,
             "Click \"Add Camera\" to scan for and pick a new camera - you'll land straight "
             "in its settings screen to name it, set its type, and place it. A 180° camera "
             "only sees the half of the room it's pointed at; a 360° camera sees the whole "
-            "room from wherever it sits."
+            "room from wherever it sits.",
+            layout=layout,
         )
-        grid_hint.setProperty("cls", "hint")
-        grid_hint.setWordWrap(True)
-        layout.addWidget(grid_hint)
 
         self.grid_status_label = QLabel("")
         self.grid_status_label.setProperty("cls", "status")

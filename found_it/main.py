@@ -9,6 +9,7 @@ import torch  # noqa: F401
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtCore import QTimer
 
 from found_it.gui.splash import create_splash_screen, splash_show_message
 from found_it.gui.main_window import MainWindow
@@ -44,6 +45,11 @@ def main():
 
     splash.finish(window)
     window.show()
+
+    # Deferred to the event loop rather than called here: these open a modal
+    # dialog, and running one before the window has painted leaves the user
+    # looking at a tutorial with an empty frame behind it.
+    QTimer.singleShot(0, window.maybe_show_startup_dialogs)
 
     sys.exit(app.exec_())
 

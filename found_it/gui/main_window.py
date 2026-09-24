@@ -4,10 +4,11 @@ import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QCheckBox, QTabWidget,
-    QPushButton, QMenu, QDockWidget, QComboBox, QApplication
+    QPushButton, QMenu, QDockWidget, QComboBox, QApplication,
+    QGraphicsDropShadowEffect
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, QByteArray, QEvent, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor
 
 NAV_TAB_KEYS_DEFAULT = ["room", "room_setup", "file", "device"]
 DOCK_PANEL_KEYS_DEFAULT = ["camera_dock", "found_items_dock"]
@@ -70,6 +71,7 @@ from found_it.utils.room_profiles import load_room_profiles
 from found_it.utils.app_settings import load_app_settings, save_app_settings
 from found_it.utils.themes import get_palette, repolish
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 from found_it.gui.camera_view import CameraView
 from found_it.gui.room_map import RoomMap
 from found_it.gui.search_panel import SearchPanel
@@ -79,11 +81,14 @@ from found_it.gui.room_setup_panel import RoomSetupPanel
 from found_it.gui.settings_panel import SettingsPanel
 from found_it.gui.camera_settings_panel import CameraSettingsPanel
 from found_it.gui.detection_worker import DetectionWorker
+from found_it.gui.welcome import TutorialDialog, WhatsNewDialog, pending_startup
+from found_it.version import APP_VERSION, current_release
 
 
-class MainWindow(QMainWindow):
+class MainWindow(QMainWindow, HelpInfoMixin):
     def __init__(self):
         super().__init__()
+        self._init_help_info()
         self.setWindowTitle("Found It")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumSize(1200, 700)
@@ -103,6 +108,7 @@ class MainWindow(QMainWindow):
         self.cam_views = {}
         self._tracked_item_id = None
         self._tracked_view = None
+        self._current_mode = "room"
 
         self._setup_ui()
         self._setup_timers()
@@ -126,10 +132,11 @@ class MainWindow(QMainWindow):
                 border-radius: 4px; {extra}
             }}
             QPushButton:checked {{
-                background-color: {p['selected']}; color: {p['text']};
-                border-bottom: 2px solid {p['accent']};
+                background: {p['selected_grad']}; color: {p['text']};
+                border-bottom: 2px solid {p['accent_grad']};
             }}
             QPushButton:hover {{ color: {p['text']}; }}
+            QPushButton:hover:!checked {{ background: {p['hover_grad']}; }}
         """
 
     def _setup_ui(self):
@@ -140,6 +147,8 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         self.nav_bar = TitleBar()
+        self.nav_bar.setObjectName("navBar")
+        self.nav_bar.setAttribute(Qt.WA_StyledBackground, True)
         self.nav_bar.setFixedHeight(48)
         nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(12, 0, 0, 0)
@@ -147,6 +156,10 @@ class MainWindow(QMainWindow):
 
         self.app_title = ClickableLabel("Found It")
         self.app_title.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self._title_glow = QGraphicsDropShadowEffect(self.app_title)
+        self._title_glow.setBlurRadius(22)
+        self._title_glow.setOffset(0, 0)
+        self.app_title.setGraphicsEffect(self._title_glow)
         self.app_title.clicked.connect(self._on_title_clicked)
         nav_layout.addWidget(self.app_title)
 
@@ -237,6 +250,8 @@ class MainWindow(QMainWindow):
         self.settings_panel.connect_device_requested.connect(self._on_connect_saved_device)
         self.settings_panel.rooms_imported.connect(self._on_rooms_imported)
         self.settings_panel.find_shortcut_requested.connect(self.start_shortcut_binding)
+        self.settings_panel.tutorial_requested.connect(self.show_tutorial)
+        self.settings_panel.whats_new_requested.connect(self.show_whats_new)
 
         self.content_layout.addWidget(self.room_widget)
         self.content_layout.addWidget(self.room_setup_panel)
@@ -260,8 +275,14 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         p = self.palette
 
-        self.nav_bar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
-        self.app_title.setStyleSheet(f"color: {p['accent']};")
+        self.nav_bar.setStyleSheet(f"""
+            #navBar {{
+                background: {p['header_grad']};
+                border-bottom: 1px solid {p['glow_line']};
+            }}
+        """)
+        self.app_title.setStyleSheet(f"color: {p['accent_grad']}; background: transparent;")
+        self._title_glow.setColor(QColor(p["accent"]))
         self._refresh_title_hotkey()
 
         nav_style = self._nav_button_style()
@@ -275,7 +296,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: transparent; border: none;
             }}
-            QPushButton:hover {{ background-color: {p['selected']}; }}
+            QPushButton:hover {{ background: {p['hover_grad']}; }}
         """
         self.minimize_btn.setStyleSheet(window_btn_style)
         self.maximize_btn.setStyleSheet(window_btn_style)
@@ -289,50 +310,59 @@ class MainWindow(QMainWindow):
         self.maximize_btn.setIcon(get_icon("copy" if self.isMaximized() else "square", p["text_faint"]))
         self.close_btn.setIcon(get_icon("x", p["text_faint"]))
 
-        self.statusBar().setStyleSheet(f"color: {p['text_faint']}; background: {p['header']};")
+        self.statusBar().setStyleSheet(
+            f"color: {p['text_faint']}; background: {p['header_grad']}; border-top: 1px solid {p['border']};"
+        )
 
         self.setStyleSheet(f"""
-            QMainWindow {{ background-color: {p['bg']}; }}
+            QMainWindow {{ background: {p['bg_grad']}; }}
             QSplitter::handle {{ background-color: {p['border']}; }}
+            QSplitter::handle:hover {{ background: {p['accent_grad']}; }}
+            QToolTip {{
+                background: {p['panel_grad']}; color: {p['text']};
+                border: 1px solid {p['glow']}; border-radius: 6px; padding: 4px 8px;
+            }}
         """)
 
         self.room_widget.setStyleSheet(f"""
             QMainWindow::separator {{ background: {p['border']}; width: 4px; height: 4px; }}
-            QMainWindow::separator:hover {{ background: {p['accent']}; }}
+            QMainWindow {{ background: transparent; }}
+            QMainWindow::separator:hover {{ background: {p['accent_grad']}; }}
             QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
-            QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
+            QDockWidget::title {{ background: {p['header_grad']}; padding: 6px 8px; border-bottom: 1px solid {p['glow_line']}; }}
             QTabBar {{ background: {p['header']}; }}
             QTabBar::tab {{
                 background: {p['panel']}; color: {p['text_dim']};
                 padding: 6px 16px; border: 1px solid {p['border']};
                 border-bottom: none; border-radius: 4px 4px 0 0;
             }}
-            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:selected {{ background: {p['selected_grad']}; color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
             QTabBar::tab:hover {{ color: {p['text']}; }}
             QMenuBar {{ background: {p['header']}; color: {p['text_dim']}; border-bottom: 1px solid {p['border']}; }}
             QMenuBar::item {{ padding: 4px 10px; }}
-            QMenuBar::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
-            QMenu {{ background: {p['panel']}; color: {p['text_dim']}; border: 1px solid {p['border']}; }}
-            QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QMenuBar::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
+            QMenu {{ background: {p['panel_grad']}; color: {p['text_dim']}; border: 1px solid {p['glow']}; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
         """)
 
         self.cam_tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border: 1px solid {p['border']}; background: {p['bg']}; }}
+            QTabWidget::pane {{ border: 1px solid {p['border']}; background: transparent; }}
             QTabBar::tab {{
                 background: {p['panel']}; color: {p['text_dim']};
                 padding: 6px 16px; border: 1px solid {p['border']};
                 border-bottom: none; border-radius: 4px 4px 0 0;
             }}
-            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:selected {{ background: {p['selected_grad']}; color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
+            QTabBar::tab:hover:!selected {{ background: {p['hover_grad']}; color: {p['text']}; }}
         """)
 
         self.main_room_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {p['selected']}; color: {p['text']};
-                border: 1px solid {p['border']}; border-radius: 4px;
+                background: {p['selected_grad']}; color: {p['text']};
+                border: 1px solid {p['glow']}; border-radius: 6px;
                 padding: 4px 12px; font-size: 12px; font-weight: bold;
             }}
-            QPushButton:hover {{ background-color: {p['hover']}; }}
+            QPushButton:hover {{ background: {p['accent_grad']}; color: white; }}
             QPushButton::menu-indicator {{ width: 0px; }}
         """)
 
@@ -345,7 +375,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid {p['border']}; border-radius: 4px;
                 padding: 4px 8px; font-size: 12px;
             }}
-            QComboBox:hover {{ background-color: {p['hover']}; }}
+            QComboBox:hover {{ background: {p['hover_grad']}; border-color: {p['glow']}; }}
             QComboBox QAbstractItemView {{
                 background-color: {p['panel']}; color: {p['text']};
                 border: 1px solid {p['border']};
@@ -364,6 +394,8 @@ class MainWindow(QMainWindow):
         self.settings_panel.apply_theme(p)
         for view in self.cam_views.values():
             view.apply_theme(p)
+
+        self._apply_help_theme(p)
 
         repolish(self)
 
@@ -386,6 +418,12 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.dewarp_check)
         controls.addStretch()
         camera_layout.addLayout(controls)
+        self._add_help(
+            None,
+            "\"Dewarp\" straightens the fisheye/360° curve out of a camera's raw feed "
+            "so straight lines in the room look straight here too.",
+            layout=camera_layout,
+        )
 
         self.cam_tabs = QTabWidget()
 
@@ -435,7 +473,16 @@ class MainWindow(QMainWindow):
         self.status_indicator = QLabel("Scanning...")
         self.status_indicator.setStyleSheet("color: #4caf50; font-size: 11px;")
         map_header.addWidget(self.status_indicator)
+
+        map_header.addWidget(self._make_info_toggle())
         center_layout.addLayout(map_header)
+        self._add_help(
+            None,
+            "This map tracks items live across every camera in the room. Pick "
+            "an item in the \"Found Items\" panel to jump to and highlight its "
+            "last known spot here.",
+            layout=center_layout,
+        )
 
         self.room_map = RoomMap()
         self.room_map.set_room_size(active_profile.width_m, active_profile.height_m)
@@ -513,6 +560,7 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def _switch_mode(self, mode):
+        self._current_mode = mode
         self.room_widget.hide()
         self.room_setup_panel.hide()
         self.file_search_panel.hide()
@@ -747,6 +795,49 @@ class MainWindow(QMainWindow):
     def _on_rooms_imported(self):
         self._on_room_updated()
         self.room_setup_panel.reload_profiles()
+
+    # ---------------- First-run tutorial / What's New ----------------
+
+    def maybe_show_startup_dialogs(self):
+        """Show the first-run walkthrough, or the notes for an update, once
+        the window is actually up. Called from main() rather than __init__
+        because a modal dialog opened before the window is shown would leave
+        the user staring at it with no app behind it."""
+        action, releases = pending_startup(self.app_settings)
+        if action == "tutorial":
+            self.show_tutorial()
+        elif action == "whats_new":
+            self.show_whats_new(releases)
+
+    def show_whats_new(self, releases=None):
+        # No argument means someone asked for the notes from Settings, rather
+        # than an update triggering them - show this version's.
+        if not releases:
+            releases = [current_release()]
+        dialog = WhatsNewDialog(self.palette, releases, self)
+        dialog.tutorial_requested.connect(self.show_tutorial)
+        dialog.center_on(self)
+        dialog.exec_()
+        self._record_guides_seen()
+
+    def show_tutorial(self):
+        # The tour switches tabs as it goes, so put the user back where they
+        # were once it's over instead of stranding them on the last step's tab.
+        return_mode = self._current_mode
+        dialog = TutorialDialog(self.palette, self)
+        dialog.mode_requested.connect(self._switch_mode)
+        dialog.center_on(self)
+        dialog.exec_()
+        self._record_guides_seen(tutorial_done=True)
+        self._switch_mode(return_mode)
+
+    def _record_guides_seen(self, tutorial_done: bool = False):
+        """Written out immediately rather than at shutdown: a crash between
+        now and then shouldn't mean the same splash again on every launch."""
+        self.app_settings.last_seen_version = APP_VERSION
+        if tutorial_done:
+            self.app_settings.tutorial_completed = True
+        save_app_settings(self.app_settings)
 
     def _setup_timers(self):
         # Detection (camera capture -> dewarp -> YOLO inference -> merge)

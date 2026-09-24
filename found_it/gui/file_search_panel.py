@@ -15,11 +15,12 @@ from typing import List
 from found_it.fileindex.search import FileSearchEngine, SearchResult
 from found_it.gui.people_panel import PeopleGalleryWidget
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 from found_it.utils.themes import get_palette, widget_qss, repolish
 from found_it.utils.os_open import open_file, open_containing_folder
 
 
-class SearchTab(QWidget):
+class SearchTab(QWidget, HelpInfoMixin):
     """Prompt or upload-an-image search across every indexed file - photos
     of people, scenery, objects, or plain documents - by CLIP visual/text
     similarity. Named people from the People tab are used automatically to
@@ -31,6 +32,7 @@ class SearchTab(QWidget):
         super().__init__(parent)
         self.engine = engine
         self.palette = get_palette("Indigo")
+        self._init_help_info()
         self._setup_ui()
         self._setup_timer()
         self._image_search_done.connect(self._on_image_search_done)
@@ -46,6 +48,7 @@ class SearchTab(QWidget):
         self.add_image_btn.setIcon(get_icon("plus", palette["text_dim"]))
         self.open_btn.setIcon(get_icon("file", palette["text_dim"]))
         self.open_dir_btn.setIcon(get_icon("folder-open", palette["text_dim"]))
+        self._apply_help_theme(palette)
         self._show_results()
         repolish(self)
 
@@ -54,10 +57,14 @@ class SearchTab(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
+        title_row = QHBoxLayout()
         title = QLabel("Search")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._make_info_toggle())
+        layout.addLayout(title_row)
 
         desc = QLabel("Find people, scenery, items, or files on your PC - describe "
                        "what you're looking for, or upload a picture of it")
@@ -84,6 +91,13 @@ class SearchTab(QWidget):
         self.image_search_btn.clicked.connect(self._search_by_image)
         search_row.addWidget(self.image_search_btn)
         layout.addLayout(search_row)
+        self._add_help(
+            None,
+            "Type a description (\"vacation photo with mountains\"), or a name "
+            "from the People tab, and press Search - or use \"Search by Image\" "
+            "to find files that look like a picture you already have.",
+            layout=layout,
+        )
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -95,12 +109,13 @@ class SearchTab(QWidget):
         self.full_pc_checkbox.stateChanged.connect(self._update_folder_label)
         layout.addWidget(self.full_pc_checkbox)
 
-        full_pc_hint = QLabel("Searches every drive on this PC (skipping system/app folders like "
-                               "Windows, Program Files, and AppData). Uncheck to scan only specific "
-                               "folders you pick below. Photos found here also populate the People tab.")
-        full_pc_hint.setProperty("cls", "hint")
-        full_pc_hint.setWordWrap(True)
-        layout.addWidget(full_pc_hint)
+        self._add_help(
+            self.full_pc_checkbox,
+            "Searches every drive on this PC (skipping system/app folders like "
+            "Windows, Program Files, and AppData). Uncheck to scan only specific "
+            "folders you pick below. Photos found here also populate the People tab.",
+            layout=layout,
+        )
 
         folder_row = QHBoxLayout()
         self.folder_label = QLabel("")
@@ -139,12 +154,13 @@ class SearchTab(QWidget):
         folder_row.addWidget(self.add_image_btn)
         layout.addLayout(folder_row)
 
-        add_image_hint = QLabel('Or add one specific image and give it a name (e.g. "Passport") '
-                                 'to jump straight to it later by typing that name. To name a '
-                                 'person instead, use the People tab.')
-        add_image_hint.setProperty("cls", "hint")
-        add_image_hint.setWordWrap(True)
-        layout.addWidget(add_image_hint)
+        self._add_help(
+            None,
+            'Or add one specific image and give it a name (e.g. "Passport") '
+            'to jump straight to it later by typing that name. To name a '
+            'person instead, use the People tab.',
+            layout=layout,
+        )
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -162,6 +178,12 @@ class SearchTab(QWidget):
         self.results_label = QLabel("Results")
         self.results_label.setProperty("cls", "muted")
         layout.addWidget(self.results_label)
+        self._add_help(
+            self.results_label,
+            "Click a result to preview it, then use \"Open File\" or \"Open "
+            "Folder\" on the right to jump straight to it.",
+            layout=layout,
+        )
 
         content_splitter = QSplitter(Qt.Horizontal)
 

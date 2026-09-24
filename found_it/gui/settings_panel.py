@@ -21,7 +21,9 @@ from found_it.utils.room_profiles import load_room_profiles, save_room_profiles,
 from found_it.utils.themes import THEME_NAMES, get_palette, widget_qss, repolish
 from found_it.device.adb_handler import ADBHandler
 from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 from found_it.gui.splash import create_notice_splash
+from found_it.version import APP_VERSION, current_release
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.room_map import RoomMap
 from found_it.gui.room_setup_panel import RoomSetupPanel
@@ -122,13 +124,15 @@ class _PreviewDropView(QGraphicsView):
             event.acceptProposedAction()
 
 
-class SettingsPanel(QWidget):
+class SettingsPanel(QWidget, HelpInfoMixin):
     """App settings: detection/camera behavior, local data management, and saved ADB devices."""
 
     settings_updated = pyqtSignal()
     connect_device_requested = pyqtSignal(str)
     rooms_imported = pyqtSignal()
     find_shortcut_requested = pyqtSignal()
+    tutorial_requested = pyqtSignal()
+    whats_new_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -138,6 +142,7 @@ class SettingsPanel(QWidget):
         self._selected_saved_index: Optional[int] = None
         self.palette = get_palette("Indigo")
         self._icon_registry = []
+        self._init_help_info()
         self._setup_ui()
         self.apply_theme(self.palette)
 
@@ -169,13 +174,14 @@ class SettingsPanel(QWidget):
                 outline: none;
             }}
             QListWidget::item {{ padding: 10px 12px; border-radius: 4px; margin: 2px 0; }}
-            QListWidget::item:selected {{ background-color: {p['accent']}; color: white; }}
+            QListWidget::item:selected {{ background: {p['accent_grad']}; color: white; }}
             QListWidget::item:hover:!selected {{ background-color: {p['panel']}; }}
         """)
 
         if hasattr(self, "preview_frame"):
             self._apply_preview_theme(p)
 
+        self._apply_help_theme(p)
         repolish(self)
 
     def _apply_preview_theme(self, p: dict):
@@ -192,7 +198,7 @@ class SettingsPanel(QWidget):
         for header in getattr(self, "_sidebar_category_headers", {}).values():
             header.setFont(QFont(family, 11, QFont.Bold))
 
-        self.preview_navbar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
+        self.preview_navbar.setStyleSheet(f"background: {p['header_grad']}; border-bottom: 1px solid {p['glow_line']};")
         self.preview_app_title.setStyleSheet(f"color: {p['accent']};")
 
         nav_button_style = f"""
@@ -234,22 +240,22 @@ class SettingsPanel(QWidget):
         self.preview_close_btn.setStyleSheet(window_btn_style)
 
         self.preview_window.setStyleSheet(f"""
-            QMainWindow {{ background-color: {p['bg']}; }}
+            QMainWindow {{ background: {p['bg_grad']}; }}
             QMainWindow::separator {{ background: {p['border']}; width: 4px; height: 4px; }}
             QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
-            QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
+            QDockWidget::title {{ background: {p['header_grad']}; padding: 6px 8px; border-bottom: 1px solid {p['glow_line']}; }}
             QTabBar {{ background: {p['header']}; }}
             QTabBar::tab {{
                 background: {p['panel']}; color: {p['text_dim']};
                 padding: 6px 16px; border: 1px solid {p['border']};
                 border-bottom: none; border-radius: 4px 4px 0 0;
             }}
-            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:selected {{ background: {p['selected_grad']}; color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
             QMenuBar {{ background: {p['header']}; color: {p['text_dim']}; border-bottom: 1px solid {p['border']}; }}
             QMenuBar::item {{ padding: 4px 10px; }}
-            QMenuBar::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
-            QMenu {{ background: {p['panel']}; color: {p['text_dim']}; border: 1px solid {p['border']}; }}
-            QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QMenuBar::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
+            QMenu {{ background: {p['panel_grad']}; color: {p['text_dim']}; border: 1px solid {p['glow']}; border-radius: 6px; }}
+            QMenu::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
         """)
 
         self.preview_cam_tabs.setStyleSheet(f"""
@@ -259,7 +265,7 @@ class SettingsPanel(QWidget):
                 padding: 6px 16px; border: 1px solid {p['border']};
                 border-bottom: none; border-radius: 4px 4px 0 0;
             }}
-            QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
+            QTabBar::tab:selected {{ background: {p['selected_grad']}; color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
         """)
         self.preview_cam_tabs.widget(0).setStyleSheet(
             f"background-color: {p['panel']}; color: {p['text_dim']}; font-size: 11px;"
@@ -321,10 +327,14 @@ class SettingsPanel(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
 
+        title_row = QHBoxLayout()
         title = QLabel("Settings")
         title.setFont(QFont("Segoe UI", 16, QFont.Bold))
         title.setProperty("cls", "title")
-        outer.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self._make_info_toggle())
+        outer.addLayout(title_row)
 
         body = QHBoxLayout()
         body.setSpacing(0)
@@ -335,6 +345,7 @@ class SettingsPanel(QWidget):
         self.nav_list.addItem(QListWidgetItem("Data & Security"))
         self.nav_list.addItem(QListWidgetItem("Saved Devices"))
         self.nav_list.addItem(QListWidgetItem("Customization"))
+        self.nav_list.addItem(QListWidgetItem("Help"))
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
         body.addWidget(self.nav_list)
 
@@ -348,6 +359,7 @@ class SettingsPanel(QWidget):
         self.pages.addWidget(self._build_data_page())
         self.pages.addWidget(self._build_devices_page())
         self.pages.addWidget(self._build_customization_page())
+        self.pages.addWidget(self._build_help_page())
         body.addWidget(self.pages, 1)
 
         outer.addLayout(body, 1)
@@ -376,6 +388,63 @@ class SettingsPanel(QWidget):
             self._refresh_saved_list()
         elif row == 3:
             self._refresh_customization_status()
+
+    # ---------------- Help page ----------------
+
+    def _build_help_page(self) -> QWidget:
+        """Where the first-run tutorial and the release notes live once
+        they've been dismissed - a walkthrough you can only ever see once
+        isn't much use the day you actually need it."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 0, 8, 8)
+        layout.setSpacing(10)
+
+        layout.addWidget(self._page_title("Help"))
+
+        release = current_release()
+        version_label = QLabel(f"Found It {APP_VERSION}" + (f"  ·  {release['date']}" if release.get("date") else ""))
+        version_label.setProperty("cls", "muted")
+        layout.addWidget(version_label)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setProperty("cls", "sep")
+        layout.addWidget(sep)
+
+        tutorial_desc = QLabel(
+            "The guided tour of the whole app: building your room, adding cameras, and "
+            "scanning this PC for pictures you can't find."
+        )
+        tutorial_desc.setProperty("cls", "muted")
+        tutorial_desc.setWordWrap(True)
+        layout.addWidget(tutorial_desc)
+
+        tutorial_row = QHBoxLayout()
+        self.replay_tutorial_btn = QPushButton("Replay the tutorial")
+        self.replay_tutorial_btn.setProperty("cls", "primary")
+        self.replay_tutorial_btn.clicked.connect(self.tutorial_requested.emit)
+        tutorial_row.addWidget(self.replay_tutorial_btn)
+        tutorial_row.addStretch()
+        layout.addLayout(tutorial_row)
+
+        layout.addSpacing(6)
+
+        notes_desc = QLabel("What was added and what changed in this version.")
+        notes_desc.setProperty("cls", "muted")
+        notes_desc.setWordWrap(True)
+        layout.addWidget(notes_desc)
+
+        notes_row = QHBoxLayout()
+        self.whats_new_btn = QPushButton("What's New")
+        self.whats_new_btn.setProperty("cls", "secondary")
+        self.whats_new_btn.clicked.connect(self.whats_new_requested.emit)
+        notes_row.addWidget(self.whats_new_btn)
+        notes_row.addStretch()
+        layout.addLayout(notes_row)
+
+        layout.addStretch()
+        return page
 
     # ---------------- Appearance page ----------------
 
@@ -470,8 +539,8 @@ class SettingsPanel(QWidget):
         btn.setStyleSheet(f"""
             QPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {p['panel']}, stop:0.33 {p['selected']},
-                    stop:0.66 {p['hover']}, stop:1 {p['accent']});
+                    stop:0 {p['panel']}, stop:0.4 {p['selected']},
+                    stop:0.75 {p['accent']}, stop:1 {p['accent2']});
                 border: 2px solid {p['border']}; border-radius: 6px;
                 color: {p['text']}; font-weight: bold; font-size: 12px;
                 padding: 6px;
