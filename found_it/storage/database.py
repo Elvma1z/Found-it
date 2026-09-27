@@ -80,14 +80,33 @@ class Database:
         return cursor.lastrowid
 
     def update_item_position(self, item_id: int, zone_x: float, zone_y: float,
-                             confidence: float, zone_name: Optional[str] = None):
-        self.conn.execute(
-            """UPDATE items SET zone_x = ?, zone_y = ?, confidence = ?,
-               zone_name = ?, last_seen = ?, is_active = 1
-               WHERE id = ?""",
-            (zone_x, zone_y, confidence, zone_name, datetime.now().isoformat(), item_id)
-        )
+                             confidence: float, zone_name: Optional[str] = None,
+                             bbox: Optional[tuple] = None):
+        # bbox is refreshed here too (not just on insert) so a highlight
+        # drawn from the item's current DB row reflects where it actually
+        # is now instead of freezing at wherever it was first detected.
+        if bbox is not None:
+            self.conn.execute(
+                """UPDATE items SET zone_x = ?, zone_y = ?, confidence = ?,
+                   zone_name = ?, bbox_x1 = ?, bbox_y1 = ?, bbox_x2 = ?, bbox_y2 = ?,
+                   last_seen = ?, is_active = 1
+                   WHERE id = ?""",
+                (zone_x, zone_y, confidence, zone_name, *bbox,
+                 datetime.now().isoformat(), item_id)
+            )
+        else:
+            self.conn.execute(
+                """UPDATE items SET zone_x = ?, zone_y = ?, confidence = ?,
+                   zone_name = ?, last_seen = ?, is_active = 1
+                   WHERE id = ?""",
+                (zone_x, zone_y, confidence, zone_name, datetime.now().isoformat(), item_id)
+            )
         self.conn.commit()
+
+    def get_item(self, item_id: int) -> Optional[dict]:
+        cursor = self.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
     def rename_item(self, item_id: int, new_label: str):
         self.conn.execute(

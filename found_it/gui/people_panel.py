@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont
 
 from found_it.fileindex.search import FileSearchEngine, SearchResult
-from found_it.utils.themes import get_palette, widget_qss, repolish
+from found_it.gui import ds
 from found_it.utils.os_open import open_file, open_containing_folder
 
 IMAGE_FILE_FILTER = "Images (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif)"
@@ -18,178 +18,115 @@ IMAGE_FILE_FILTER = "Images (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif)
 
 class PeopleGalleryWidget(QWidget):
     """Browse the people detected while indexing photos: a gallery of face
-    thumbnails (one per clustered person, named or not) that, when
-    selected, shows every photo containing them."""
+    tiles (one per clustered person, named or not) that, when selected,
+    shows every photo containing them."""
 
     _add_person_done = pyqtSignal(object, str)
     _add_file_done = pyqtSignal(bool, int)
+    people_count_changed = pyqtSignal(int)
 
     def __init__(self, engine: FileSearchEngine, parent=None):
         super().__init__(parent)
         self.engine = engine
-        self.palette = get_palette("Indigo")
         self._people: List[dict] = []
         self._person_results: List[SearchResult] = []
         self._setup_ui()
         self._add_person_done.connect(self._on_add_person_done)
         self._add_file_done.connect(self._on_add_file_done)
-        self.apply_theme(self.palette)
 
     def apply_theme(self, palette: dict):
-        self.palette = palette
-        self.setStyleSheet(widget_qss(palette))
-        repolish(self)
+        pass
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
-        title = QLabel("People")
-        title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        title.setProperty("cls", "title")
-        layout.addWidget(title)
-
-        desc = QLabel("Faces found while indexing your photos. Click a person to see "
-                       "their photos, or rename them so search can find them by name.")
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        top_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setProperty("cls", "secondary")
-        self.refresh_btn.clicked.connect(self.refresh)
-        top_row.addWidget(self.refresh_btn)
-        top_row.addStretch()
-        layout.addLayout(top_row)
-
-        self.status_label = QLabel("")
-        self.status_label.setProperty("cls", "hint")
-        layout.addWidget(self.status_label)
-
-        splitter = QSplitter(Qt.Horizontal)
-
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(4)
-
-        self.people_search = QLineEdit()
-        self.people_search.setPlaceholderText("Search people...")
-        self.people_search.textChanged.connect(self._filter_people)
-        left_layout.addWidget(self.people_search)
-
-        self.people_list = QListWidget()
-        self.people_list.setViewMode(QListWidget.IconMode)
-        self.people_list.setIconSize(QSize(96, 96))
-        self.people_list.setResizeMode(QListWidget.Adjust)
-        self.people_list.setMovement(QListWidget.Static)
-        self.people_list.setSpacing(10)
-        self.people_list.setWordWrap(True)
-        self.people_list.currentRowChanged.connect(self._on_person_selected)
-        left_layout.addWidget(self.people_list)
-
-        splitter.addWidget(left_panel)
-
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(4, 0, 0, 0)
-
-        desc_search_row = QHBoxLayout()
-        self.description_search = QLineEdit()
-        self.description_search.setPlaceholderText('e.g. "Riddeck wearing a blue jacket"')
-        self.description_search.returnPressed.connect(self._on_description_search)
-        desc_search_row.addWidget(self.description_search)
-
-        self.description_search_btn = QPushButton("Find")
-        self.description_search_btn.setProperty("cls", "primary")
-        self.description_search_btn.clicked.connect(self._on_description_search)
-        desc_search_row.addWidget(self.description_search_btn)
-        right_layout.addLayout(desc_search_row)
-
-        desc_search_hint = QLabel("Name a person plus what they're wearing or doing, and their "
-                                   "photos are ranked by the closest match.")
-        desc_search_hint.setProperty("cls", "hint")
-        desc_search_hint.setWordWrap(True)
-        right_layout.addWidget(desc_search_hint)
-
-        rename_row = QHBoxLayout()
-        self.rename_btn = QPushButton("Rename")
-        self.rename_btn.setProperty("cls", "secondary")
-        self.rename_btn.setEnabled(False)
-        self.rename_btn.clicked.connect(self._rename_selected_person)
-        rename_row.addWidget(self.rename_btn)
-
-        self.delete_btn = QPushButton("Delete")
-        self.delete_btn.setProperty("cls", "secondary")
-        self.delete_btn.setEnabled(False)
-        self.delete_btn.setToolTip("Remove this person - their photos stay indexed, just untagged")
-        self.delete_btn.clicked.connect(self._delete_selected_person)
-        rename_row.addWidget(self.delete_btn)
-
-        self.add_person_btn = QPushButton("+ Add Person")
-        self.add_person_btn.setProperty("cls", "secondary")
+        # --- People gallery ---
+        left = ds.GlassPanel("People", "users")
+        self.add_person_btn = ds.Button("Add person", "ghost", "user-plus", size="sm")
         self.add_person_btn.setToolTip("Pick a photo of someone to tag them as a new person")
         self.add_person_btn.clicked.connect(self._add_person)
-        rename_row.addWidget(self.add_person_btn)
+        left.add_action(self.add_person_btn)
+        self.refresh_btn = left.add_icon_button("refresh-cw", "Refresh")
+        self.refresh_btn.clicked.connect(lambda: self.refresh())
+        lb = left.body_layout
+        lb.addWidget(ds.text("Faces found while indexing your photos. Name someone so search can find them.",
+                             "small", wrap=True))
+        self.people_search = ds.TextInput("Search people...", icon="search", size="sm")
+        self.people_search.textChanged.connect(self._filter_people)
+        lb.addWidget(self.people_search)
+        self.people_list = ds.RowList("No people detected yet. Scan your photos from the Search tab first.",
+                                      "users", grid=True)
+        self.people_list.currentRowChanged.connect(self._on_person_selected)
+        lb.addWidget(self.people_list, 1)
+        self.status_label = ds.text("", "caption", wrap=True)
+        lb.addWidget(self.status_label)
+        layout.addWidget(left, 13)
 
-        self.add_file_btn = QPushButton("+ Add File")
-        self.add_file_btn.setProperty("cls", "secondary")
-        self.add_file_btn.setEnabled(False)
-        self.add_file_btn.setToolTip("Pick another photo of the selected person to add to their gallery")
+        # --- Selected person ---
+        self.person_panel = ds.GlassPanel("Person", "user")
+        self.rename_btn = self.person_panel.add_icon_button("pencil", "Rename")
+        self.rename_btn.clicked.connect(self._rename_selected_person)
+        self.add_file_btn = self.person_panel.add_icon_button("image-plus", "Add a photo of this person")
         self.add_file_btn.clicked.connect(self._add_file_to_selected_person)
-        rename_row.addWidget(self.add_file_btn)
+        self.delete_btn = self.person_panel.add_icon_button(
+            "trash-2", "Remove this person - their photos stay indexed, just untagged", danger=True)
+        self.delete_btn.clicked.connect(self._delete_selected_person)
+        for b in (self.rename_btn, self.add_file_btn, self.delete_btn):
+            b.setEnabled(False)
+        rb = self.person_panel.body_layout
 
-        rename_row.addStretch()
-        right_layout.addLayout(rename_row)
-
-        self.photos_label = QLabel("Select a person to see their photos")
-        self.photos_label.setProperty("cls", "muted")
-        right_layout.addWidget(self.photos_label)
-
-        self.photos_list = QListWidget()
+        self.description_search = ds.TextInput('e.g. "Riddeck wearing a blue jacket"', size="sm")
+        self.description_search.returnPressed.connect(self._on_description_search)
+        self.description_search_btn = ds.Button("Find", "primary", size="sm")
+        self.description_search_btn.clicked.connect(self._on_description_search)
+        rb.addLayout(ds.hbox(self.description_search, self.description_search_btn, stretch_at=0))
+        rb.addWidget(ds.text("Name a person plus what they're wearing or doing to rank their photos.",
+                             "caption", wrap=True))
+        rb.addWidget(ds.separator())
+        self.photos_label = ds.text("", "eyebrow")
+        rb.addWidget(self.photos_label)
+        self.photos_list = ds.RowList("Select a person to see their photos.", "image")
         self.photos_list.currentRowChanged.connect(self._on_photo_selected)
-        right_layout.addWidget(self.photos_list)
+        rb.addWidget(self.photos_list, 1)
 
-        btn_row = QHBoxLayout()
-        self.open_btn = QPushButton("Open File")
+        self.open_btn = ds.Button("Open file", "secondary", "external-link", size="sm")
         self.open_btn.setEnabled(False)
-        self.open_btn.setProperty("cls", "secondary")
         self.open_btn.clicked.connect(self._open_photo)
-        btn_row.addWidget(self.open_btn)
-
-        self.open_dir_btn = QPushButton("Open Folder")
+        self.open_dir_btn = ds.Button("Open folder", "ghost", "folder-open", size="sm")
         self.open_dir_btn.setEnabled(False)
-        self.open_dir_btn.setProperty("cls", "secondary")
         self.open_dir_btn.clicked.connect(self._open_photo_folder)
-        btn_row.addWidget(self.open_dir_btn)
-        right_layout.addLayout(btn_row)
+        rb.addLayout(ds.hbox(self.open_btn, self.open_dir_btn, None))
+        layout.addWidget(self.person_panel, 10)
 
-        splitter.addWidget(right_panel)
-        splitter.setSizes([420, 300])
-        layout.addWidget(splitter)
+    def _set_person_actions(self, enabled: bool):
+        for b in (self.rename_btn, self.delete_btn, self.add_file_btn):
+            b.setEnabled(enabled)
+
+    @staticmethod
+    def _display_name(person: dict) -> str:
+        return person["name"] or f"Unnamed #{person['id']}"
+
+    def _photo_row(self, result, score=None):
+        return ds.make_row("result", icon="image", color="#a78bfa", title=result.name,
+                           path=result.path, score=score)
 
     def refresh(self, select_person_id: Optional[int] = None):
         self._people = self.engine.get_people()
         self.people_list.clear()
         self.photos_list.clear()
         self._person_results = []
-        self.photos_label.setText("Select a person to see their photos")
-        self.rename_btn.setEnabled(False)
-        self.delete_btn.setEnabled(False)
-        self.add_file_btn.setEnabled(False)
+        self.photos_label.setText("")
+        self.person_panel.set_title("Person")
+        self._set_person_actions(False)
         self.open_btn.setEnabled(False)
         self.open_dir_btn.setEnabled(False)
 
         for person in self._people:
-            display_name = person["name"] or f"Unnamed #{person['id']}"
-            item = QListWidgetItem(f"{display_name}\n({person['face_count']} photo(s))")
+            item = ds.make_row("person", title=self._display_name(person), count=person["face_count"],
+                               image=person.get("thumbnail_path"))
             item.setData(Qt.UserRole, person["id"])
-            thumb = person.get("thumbnail_path")
-            if thumb and os.path.exists(thumb):
-                item.setIcon(QIcon(QPixmap(thumb)))
-            item.setTextAlignment(Qt.AlignHCenter)
             self.people_list.addItem(item)
 
         self._filter_people(self.people_search.text())
@@ -197,7 +134,9 @@ class PeopleGalleryWidget(QWidget):
         if not self._people:
             self.status_label.setText("No people detected yet. Scan your photos from the Search tab first.")
         else:
-            self.status_label.setText(f"{len(self._people)} person/people detected")
+            n = len(self._people)
+            self.status_label.setText(f"{n} {'person' if n == 1 else 'people'} detected")
+        self.people_count_changed.emit(len(self._people))
 
         if select_person_id is not None:
             for i, person in enumerate(self._people):
@@ -241,22 +180,21 @@ class PeopleGalleryWidget(QWidget):
                 self.people_list.setCurrentRow(i)
                 break
         self.people_list.blockSignals(False)
-        self.rename_btn.setEnabled(True)
-        self.delete_btn.setEnabled(True)
-        self.add_file_btn.setEnabled(True)
+        self._set_person_actions(True)
+        self.person_panel.set_title(person_name)
 
         self._person_results = results
         self.photos_list.clear()
         for result in results:
-            item = QListWidgetItem(f"{result.name}\n  {result.path}\n  Match: {result.score:.0%}")
-            self.photos_list.addItem(item)
+            self.photos_list.addItem(self._photo_row(result, result.score))
 
         if not results:
-            self.photos_label.setText(f"{person_name}: no photos closely match that description")
-            self.status_label.setText("No close matches - try a different description")
+            self.photos_label.setText("No close matches")
+            self.photos_list.set_empty("No photos closely match that description.", "search-x")
+            self.status_label.setText("No close matches - try a different description.")
         else:
-            self.photos_label.setText(f'{person_name}: {len(results)} match(es) for that description')
-            self.status_label.setText(f"Found {len(results)} match(es)")
+            self.photos_label.setText(f"{len(results)} match{'es' if len(results) != 1 else ''} for that description")
+            self.status_label.setText("")
 
     def _on_person_selected(self, row):
         self.photos_list.clear()
@@ -264,23 +202,23 @@ class PeopleGalleryWidget(QWidget):
         self.open_dir_btn.setEnabled(False)
 
         if row < 0 or row >= len(self._people):
-            self.rename_btn.setEnabled(False)
-            self.delete_btn.setEnabled(False)
-            self.add_file_btn.setEnabled(False)
-            self.photos_label.setText("Select a person to see their photos")
+            self._set_person_actions(False)
+            self.person_panel.set_title("Person")
+            self.photos_label.setText("")
+            self.photos_list.set_empty("Select a person to see their photos.", "image")
             return
 
-        self.rename_btn.setEnabled(True)
-        self.delete_btn.setEnabled(True)
-        self.add_file_btn.setEnabled(True)
+        self._set_person_actions(True)
         person = self._people[row]
         self._person_results = self.engine.get_files_for_person(person["id"])
-        display_name = person["name"] or f"Unnamed #{person['id']}"
-        self.photos_label.setText(f"{display_name}: {len(self._person_results)} photo(s)")
+        display_name = self._display_name(person)
+        self.person_panel.set_title(display_name)
+        n = len(self._person_results)
+        self.photos_label.setText(f"{n} of {person['face_count']} photo{'s' if person['face_count'] != 1 else ''}")
+        self.photos_list.set_empty("No photos for this person yet.", "image")
 
         for result in self._person_results:
-            item = QListWidgetItem(f"{result.name}\n  {result.path}")
-            self.photos_list.addItem(item)
+            self.photos_list.addItem(self._photo_row(result))
 
     def _on_photo_selected(self, row):
         enabled = 0 <= row < len(self._person_results)

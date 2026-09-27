@@ -1,36 +1,205 @@
-from PyQt5.QtWidgets import QWidget
-from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QBrush
-from typing import List, Tuple, Optional
+"""components/room/RoomMap - the top-down room plan.
 
-from found_it.utils.themes import get_palette
+The paint helpers are shared with Room Setup's editable canvas, so both maps
+draw the room, zones, drawers, cameras and pins identically."""
+
+import math
+from typing import List, Optional, Tuple
+
+from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
+from PyQt5.QtWidgets import QWidget
+
+from found_it.gui import ds
+from found_it.gui.icons import get_pixmap
+from found_it.utils.themes import DRAWER_LINE, PIN_SELECTED, pin_color
+
+M_TO_FT = 3.28084
+
+
+def _facing_wedge_path(cx: float, cy: float, radius: float, facing_deg: float, steps: int = 24) -> QPainterPath:
+    """A 180 deg pie slice centered on facing_deg (0deg = +x, 90deg = +y,
+    matching the room's coordinate system), for drawing a camera's actual
+    field of view instead of implying it can see the whole room."""
+    path = QPainterPath()
+    path.moveTo(cx, cy)
+    facing_rad = math.radians(facing_deg)
+    for i in range(steps + 1):
+        ang = facing_rad - math.pi / 2 + math.pi * i / steps
+        path.lineTo(cx + radius * math.cos(ang), cy + radius * math.sin(ang))
+    path.closeSubpath()
+    return path
+
+
+# ---------------------------------------------------------------- shared paint helpers
+
+def paint_room(painter: QPainter, p: dict, rect: QRectF, scale: float, room_w: float, room_h: float,
+               caption: bool = True):
+    """Rounded room outline on surface-2, half-metre grid hairlines (every
+    metre a little stronger) and the size caption underneath."""
+    painter.setPen(QPen(QColor(p["border_strong"]), 1.5))
+    painter.setBrush(QColor(p["surface2"]))
+    painter.drawRoundedRect(rect, 10, 10)
+
+    clip = QPainterPath()
+    clip.addRoundedRect(rect, 10, 10)
+    painter.save()
+    painter.setClipPath(clip)
+    step = 0.5
+    if scale * step >= 6:
+        n = 1
+        while n * step < room_w:
+            x = rect.left() + n * step * scale
+            painter.setPen(QPen(QColor(p["border"]), 1 if n % 2 == 0 else 0.5))
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            n += 1
+        n = 1
+        while n * step < room_h:
+            y = rect.top() + n * step * scale
+            painter.setPen(QPen(QColor(p["border"]), 1 if n % 2 == 0 else 0.5))
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+            n += 1
+    painter.restore()
+
+    if caption:
+        painter.setPen(QColor(p["text3"]))
+        painter.setFont(ds.font(11))
+        painter.drawText(QPointF(rect.left(), rect.bottom() + 20),
+                         f"{room_w * M_TO_FT:.1f} ft × {room_h * M_TO_FT:.1f} ft")
+
+
+def paint_zone(painter: QPainter, p: dict, rect: QRectF, name: str, selected: bool = False):
+    accent = QColor(p["accent"])
+    fill = QColor(accent)
+    fill.setAlphaF(0.16 if selected else 0.10)
+    stroke = QColor(accent)
+    stroke.setAlphaF(0.9 if selected else 0.55)
+    painter.setPen(QPen(stroke, 1.5 if selected else 1))
+    painter.setBrush(fill)
+    painter.drawRoundedRect(rect, 6, 6)
+    painter.setPen(QColor(p["accent_text"]))
+    painter.setFont(ds.font(11.5, 600))
+    fm = painter.fontMetrics()
+    painter.drawText(QPointF(rect.left() + 8, rect.top() + 17),
+                     fm.elidedText(name or "Zone", Qt.ElideRight, int(max(rect.width() - 14, 10))))
+
+
+def paint_drawer(painter: QPainter, rect: QRectF, name: str, first: bool):
+    line = QColor(DRAWER_LINE)
+    line.setAlphaF(0.6)
+    pen = QPen(line, 1, Qt.CustomDashLine)
+    pen.setDashPattern([3, 3])
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    inner = rect.adjusted(3, 22 if first else 3, -3, -3)
+    if inner.height() < 6:
+        inner = rect.adjusted(3, 3, -3, -3)
+    painter.drawRoundedRect(inner, 4, 4)
+    painter.setPen(QColor(DRAWER_LINE))
+    painter.setFont(ds.font(10))
+    fm = painter.fontMetrics()
+    if inner.height() >= 14:
+        painter.drawText(QPointF(rect.left() + 9, rect.bottom() - 8),
+                         fm.elidedText(name or "Drawer", Qt.ElideRight, int(max(rect.width() - 18, 10))))
+
+
+def paint_camera(painter: QPainter, p: dict, cx: float, cy: float, cam: dict, room_rect: QRectF,
+                 label_right: bool = True, dim: bool = False, selected: bool = False, radius: float = 11):
+    color = QColor(pin_color(cam.get("id", 0)))
+    if dim:
+        color.setAlphaF(0.4)
+    r = min(room_rect.width(), room_rect.height()) / 2 - 10
+    if cam.get("is_360"):
+        ring = QColor(color)
+        ring.setAlphaF(0.25)
+        pen = QPen(ring, 1, Qt.CustomDashLine)
+        pen.setDashPattern([2, 4])
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+    elif cam.get("is_180"):
+        edge = QColor(color)
+        edge.setAlphaF(0.3)
+        fill = QColor(color)
+        fill.setAlphaF(0.08)
+        painter.setPen(QPen(edge, 1, Qt.DotLine))
+        painter.setBrush(fill)
+        painter.drawPath(_facing_wedge_path(cx, cy, r, cam.get("facing_deg", 0.0)))
+    if selected:
+        ring = QColor(p["accent"])
+        pen = QPen(ring, 1.5, Qt.CustomDashLine)
+        pen.setDashPattern([3, 3])
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), radius + 5, radius + 5)
+    painter.setPen(QPen(color, 1.5))
+    painter.setBrush(QColor(p["solid"]))
+    painter.drawEllipse(QPointF(cx, cy), radius, radius)
+    painter.drawPixmap(QPointF(cx - 6, cy - 6), get_pixmap("camera", color.name(), 12))
+    label = cam.get("label") or f"Camera {cam.get('id', 0)}"
+    painter.setFont(ds.font(11))
+    painter.setPen(QColor(p["text2"]))
+    fm = painter.fontMetrics()
+    if label_right:
+        painter.drawText(QPointF(cx + radius + 5, cy + 4), label)
+    else:
+        painter.drawText(QPointF(cx - radius - 5 - fm.horizontalAdvance(label), cy + 4), label)
+
+
+def paint_pin(painter: QPainter, p: dict, px: float, py: float, label: str, cam_id: int,
+              selected: bool = False, pulse: float = 0.0):
+    col = QColor(PIN_SELECTED if selected else pin_color(cam_id))
+    if selected:
+        ring = QColor(col)
+        ring.setAlphaF(0.7 * (1 - pulse))
+        painter.setPen(QPen(ring, 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(px, py), 6 + 10 * pulse, 6 + 10 * pulse)
+    halo = QColor(col)
+    halo.setAlphaF(0.25)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(halo)
+    r = 9 if selected else 7
+    painter.drawEllipse(QPointF(px, py), r, r)
+    painter.setPen(QPen(QColor(p["bg"]), 1.5))
+    painter.setBrush(col)
+    r = 5 if selected else 4
+    painter.drawEllipse(QPointF(px, py), r, r)
+
+    painter.setFont(ds.font(11.5, 600 if selected else 400))
+    fm = painter.fontMetrics()
+    w = fm.horizontalAdvance(label) + 14
+    pill = QRectF(px + 11, py - 10, w, 20)
+    if selected:
+        painter.setPen(QPen(QColor(p["border_strong"]), 1))
+        painter.setBrush(QColor(p["solid"]))
+        painter.drawRoundedRect(pill, 5, 5)
+    painter.setPen(QColor(p["text"] if selected else p["text2"]))
+    painter.drawText(pill.adjusted(7, 0, 0, 0), Qt.AlignVCenter, label)
 
 
 class RoomMap(QWidget):
-    PIN_COLORS = {
-        0: QColor(255, 100, 100),
-        1: QColor(100, 100, 255),
-        2: QColor(100, 255, 180),
-    }
-    FALLBACK_COLORS = [
-        QColor(255, 180, 60), QColor(200, 100, 255), QColor(255, 100, 200),
-        QColor(120, 220, 255), QColor(180, 255, 100),
-    ]
+    """Room Tracker's live map. Click a pin to select that item."""
+
+    item_clicked = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(300, 260)
         self.items: List[dict] = []
         self.zones: List[dict] = []
         self.cameras: List[dict] = []
         self.room_width = 4.0
         self.room_height = 4.0
-        self.selected_item_id: Optional[int] = None
-        self._padding = 40
-        self.palette = get_palette("Indigo")
+        self._padding = 36
+        self._selected_id = None
+        self._pulse = 0.0
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._tick)
+        self.setMouseTracking(True)
+        ds.theme_bus().changed.connect(lambda _p: self.update())
 
     def apply_theme(self, palette: dict):
-        self.palette = palette
         self.update()
 
     def set_room_size(self, width: float, height: float):
@@ -50,134 +219,87 @@ class RoomMap(QWidget):
         self.items = items
         self.update()
 
-    def select_item(self, item_id: Optional[int]):
-        self.selected_item_id = item_id
+    def set_selected_item(self, item_id):
+        self._selected_id = item_id
+        if item_id is None:
+            self._pulse_timer.stop()
+        elif not self._pulse_timer.isActive():
+            self._pulse_timer.start(40)
+        self.update()
+
+    def _tick(self):
+        self._pulse = (self._pulse + 40 / 1600) % 1.0
         self.update()
 
     def _color_for_camera(self, cam_id: int) -> QColor:
-        if cam_id in self.PIN_COLORS:
-            return self.PIN_COLORS[cam_id]
-        return self.FALLBACK_COLORS[cam_id % len(self.FALLBACK_COLORS)]
+        return QColor(pin_color(cam_id))
 
     def _scale_and_offset(self) -> Tuple[float, float, float, float, float]:
-        """A single meters-to-pixels scale (not one per axis) so the room and
-        everything in it renders in true proportion instead of stretching to
-        fill the widget - the room is letterboxed/centered within it instead."""
-        draw_w = self.width() - 2 * self._padding
-        draw_h = self.height() - 2 * self._padding
+        """A single metres-to-pixels scale (not one per axis) so the room is
+        drawn in true proportion, letterboxed and centred in the widget."""
+        pad = self._padding
+        draw_w = self.width() - 2 * pad
+        draw_h = self.height() - 2 * pad
         if self.room_width <= 0 or self.room_height <= 0 or draw_w <= 0 or draw_h <= 0:
-            return 1.0, float(self._padding), float(self._padding), float(max(draw_w, 0)), float(max(draw_h, 0))
+            return 1.0, float(pad), float(pad), float(max(draw_w, 0)), float(max(draw_h, 0))
         scale = min(draw_w / self.room_width, draw_h / self.room_height)
         room_px_w = self.room_width * scale
         room_px_h = self.room_height * scale
-        ox = self._padding + (draw_w - room_px_w) / 2.0
-        oy = self._padding + (draw_h - room_px_h) / 2.0
+        ox = pad + (draw_w - room_px_w) / 2.0
+        oy = pad + (draw_h - room_px_h) / 2.0
         return scale, ox, oy, room_px_w, room_px_h
 
-    def _room_to_pixel(self, room_x: float, room_y: float) -> Tuple[int, int]:
+    def _room_to_pixel(self, room_x: float, room_y: float) -> Tuple[float, float]:
         scale, ox, oy, _, _ = self._scale_and_offset()
-        return int(ox + room_x * scale), int(oy + room_y * scale)
+        return ox + room_x * scale, oy + room_y * scale
 
-    def _pixel_to_room(self, px: int, py: int) -> Tuple[float, float]:
+    def _pixel_to_room(self, px: float, py: float) -> Tuple[float, float]:
         scale, ox, oy, _, _ = self._scale_and_offset()
-        room_x = (px - ox) / scale if scale else 0.0
-        room_y = (py - oy) / scale if scale else 0.0
-        return room_x, room_y
+        return ((px - ox) / scale if scale else 0.0), ((py - oy) / scale if scale else 0.0)
+
+    def _item_at(self, pos) -> Optional[dict]:
+        for item in reversed(self.items):
+            px, py = self._room_to_pixel(item.get("room_x", 0), item.get("room_y", 0))
+            if (pos.x() - px) ** 2 + (pos.y() - py) ** 2 <= 12 ** 2:
+                return item
+        return None
+
+    def mouseMoveEvent(self, event):
+        self.setCursor(Qt.PointingHandCursor if self._item_at(event.pos()) else Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        item = self._item_at(event.pos())
+        if item is not None:
+            self.item_clicked.emit(item)
 
     def paintEvent(self, event):
-        p = self.palette
+        p = ds.pal()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        scale, ox, oy, rw, rh = self._scale_and_offset()
+        room_rect = QRectF(ox, oy, rw, rh)
+        paint_room(painter, p, room_rect, scale, self.room_width, self.room_height)
 
-        _, ox, oy, room_px_w, room_px_h = self._scale_and_offset()
-        ox, oy, room_px_w, room_px_h = int(ox), int(oy), int(room_px_w), int(room_px_h)
-        room_rect = QRect(ox, oy, room_px_w, room_px_h)
-
-        painter.setPen(QPen(QColor(p["border"]), 2))
-        painter.setBrush(QBrush(QColor(p["bg"])))
-        painter.drawRoundedRect(room_rect, 6, 6)
-
-        painter.setPen(QPen(QColor(p["border"]), 1, Qt.DashLine))
-        for i in range(1, 3):
-            x = ox + int(room_px_w * i / 3)
-            painter.drawLine(x, oy, x, oy + room_px_h)
-            y = oy + int(room_px_h * i / 3)
-            painter.drawLine(ox, y, ox + room_px_w, y)
-
-        painter.setPen(QPen(QColor(p["text_faint"]), 1))
-        font = QFont("Segoe UI", 8)
-        painter.setFont(font)
-        for i in range(3):
-            x = ox + int(room_px_w * (i + 0.5) / 3)
-            painter.drawText(x - 10, oy + room_px_h + 15, f"{(i+1)/3:.1f}")
-
-        accent = QColor(p["accent"])
-        accent_hover = QColor(p["accent_hover"])
         for zone in self.zones:
-            zx1, zy1 = self._room_to_pixel(zone["x1"], zone["y1"])
-            zx2, zy2 = self._room_to_pixel(zone["x2"], zone["y2"])
-            painter.setPen(QPen(accent, 1, Qt.DashLine))
-            painter.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 30)))
-            painter.drawRect(zx1, zy1, zx2 - zx1, zy2 - zy1)
-            painter.setPen(QPen(accent_hover, 1))
-            font = QFont("Segoe UI", 7)
-            painter.setFont(font)
-            painter.drawText(zx1 + 4, zy1 + 12, zone.get("name", "Zone"))
-
-            for drawer in zone.get("drawers", []):
+            x1, y1 = self._room_to_pixel(zone["x1"], zone["y1"])
+            x2, y2 = self._room_to_pixel(zone["x2"], zone["y2"])
+            paint_zone(painter, p, QRectF(x1, y1, x2 - x1, y2 - y1), zone.get("name", "Zone"))
+            for j, drawer in enumerate(zone.get("drawers", [])):
                 dx1, dy1 = self._room_to_pixel(drawer["x1"], drawer["y1"])
                 dx2, dy2 = self._room_to_pixel(drawer["x2"], drawer["y2"])
-                painter.setPen(QPen(QColor(255, 210, 90), 1, Qt.DotLine))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawRect(dx1, dy1, dx2 - dx1, dy2 - dy1)
-                painter.setPen(QPen(QColor(230, 215, 170), 1))
-                painter.setFont(QFont("Segoe UI", 6))
-                painter.drawText(dx1 + 3, dy1 + 10, drawer.get("name", "Drawer"))
+                paint_drawer(painter, QRectF(dx1, dy1, dx2 - dx1, dy2 - dy1), drawer.get("name", "Drawer"), j == 0)
 
         for cam in self.cameras:
             if not cam.get("enabled"):
                 continue
-            cam_id = cam.get("id", 0)
-            cam_px, cam_py = self._room_to_pixel(cam.get("x", 0), cam.get("y", 0))
-            color = self._color_for_camera(cam_id)
-            label = cam.get("label", f"Camera {cam_id}")
+            cx, cy = self._room_to_pixel(cam.get("x", 0), cam.get("y", 0))
+            paint_camera(painter, p, cx, cy, cam, room_rect,
+                         label_right=cam.get("x", 0) <= self.room_width / 2)
 
-            painter.setPen(QPen(color, 2))
-            painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 80)))
-            painter.drawEllipse(cam_px - 8, cam_py - 8, 16, 16)
-            painter.setFont(QFont("Segoe UI", 8))
-            painter.drawText(cam_px + 12, cam_py + 5, label)
-
-            if cam.get("is_360"):
-                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 40), 1, Qt.DotLine))
-                painter.setBrush(Qt.NoBrush)
-                radius = min(room_px_w, room_px_h) // 2 - 10
-                painter.drawEllipse(cam_px - radius, cam_py - radius, radius * 2, radius * 2)
-
-        for item in self.items:
-            room_x = item.get("room_x", 0)
-            room_y = item.get("room_y", 0)
-            px, py = self._room_to_pixel(room_x, room_y)
-
-            cam_id = item.get("camera_id", 0)
-            is_selected = item.get("id") == self.selected_item_id
-
-            color = self._color_for_camera(cam_id)
-            if is_selected:
-                color = QColor(255, 255, 0)
-
-            pin_size = 12 if is_selected else 8
-            painter.setPen(QPen(color, 2))
-            painter.setBrush(QBrush(color))
-            painter.drawEllipse(px - pin_size // 2, py - pin_size // 2,
-                                pin_size, pin_size)
-
-            label = item.get("label", "?")
-            font = QFont("Segoe UI", 7)
-            painter.setFont(font)
-            painter.setPen(QPen(QColor(p["text_dim"]), 1))
-            text_rect = QRect(px + 8, py - 8, 120, 16)
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
-                             f"{label} [cam{cam_id}]")
-
+        ordered = sorted(self.items, key=lambda it: it.get("id") == self._selected_id)
+        for item in ordered:
+            px, py = self._room_to_pixel(item.get("room_x", 0), item.get("room_y", 0))
+            paint_pin(painter, p, px, py, item.get("label", "?"), item.get("camera_id", 0),
+                      selected=item.get("id") == self._selected_id and self._selected_id is not None,
+                      pulse=self._pulse)
         painter.end()

@@ -14,6 +14,7 @@ from found_it.gui.splash import create_splash_screen, splash_show_message
 from found_it.gui.main_window import MainWindow
 from found_it.utils.app_settings import load_app_settings
 from found_it.utils.themes import get_palette
+from found_it.gui.ds import apply_app_theme
 from found_it.utils.resources import ICON_PATH
 
 
@@ -27,15 +28,12 @@ def main():
     font = QFont(settings.font_family, 10)
     app.setFont(font)
 
-    app.setStyleSheet("""
-        QToolTip {
-            background-color: #2a2a3e;
-            color: #e0e0e0;
-            border: 1px solid #444;
-        }
-    """)
+    # The whole design system is one application stylesheet; installing it
+    # before anything is created means the splash and first paint match.
+    palette = get_palette(settings.theme)
+    apply_app_theme(palette, settings.font_family)
 
-    splash = create_splash_screen(get_palette(settings.theme))
+    splash = create_splash_screen(palette)
     splash.show()
     splash_show_message(splash, "Starting up...")
     app.processEvents()

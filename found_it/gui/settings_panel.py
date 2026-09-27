@@ -10,17 +10,23 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QMainWindow, QDockWidget, QScrollArea, QTabWidget, QComboBox,
     QGraphicsScene, QGraphicsView
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject, QEvent, QMimeData
-from PyQt5.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter, QColor, QDrag
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject, QEvent, QMimeData, QUrl
+from PyQt5.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter, QColor, QDrag, QDesktopServices
 
-from found_it.config import DATA_DIR, DB_PATH, SNAPSHOTS_DIR
+from found_it.config import DATA_DIR, DB_PATH, DETECTION_MODEL_CHOICES, SNAPSHOTS_DIR
 from found_it.storage.database import Database
 from found_it.utils.app_settings import load_app_settings, save_app_settings
 from found_it.utils.saved_devices import load_saved_devices, save_saved_devices
 from found_it.utils.room_profiles import load_room_profiles, save_room_profiles, profile_from_dict, profiles_to_list
-from found_it.utils.themes import THEME_NAMES, get_palette, widget_qss, repolish
+from found_it.utils.themes import (
+    ACCENT_NAMES, DEFAULT_THEME, THEME_NAMES, get_palette, widget_qss, repolish, theme_name, theme_parts,
+)
+from found_it.gui import ds
 from found_it.device.adb_handler import ADBHandler
+from found_it.gui.icons import get_icon, ICON_SIZE
+from found_it.gui.help_info import HelpInfoMixin
 from found_it.gui.splash import create_notice_splash
+from found_it.version import APP_VERSION, current_release
 from found_it.gui.search_panel import SearchPanel
 from found_it.gui.room_map import RoomMap
 from found_it.gui.room_setup_panel import RoomSetupPanel
@@ -121,13 +127,15 @@ class _PreviewDropView(QGraphicsView):
             event.acceptProposedAction()
 
 
-class SettingsPanel(QWidget):
+class SettingsPanel(QWidget, HelpInfoMixin):
     """App settings: detection/camera behavior, local data management, and saved ADB devices."""
 
     settings_updated = pyqtSignal()
     connect_device_requested = pyqtSignal(str)
     rooms_imported = pyqtSignal()
     find_shortcut_requested = pyqtSignal()
+    tutorial_requested = pyqtSignal()
+    whats_new_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -135,31 +143,32 @@ class SettingsPanel(QWidget):
         self.saved_devices = load_saved_devices()
         self._detected_devices = []
         self._selected_saved_index: Optional[int] = None
-        self.palette = get_palette("Indigo")
+        self.palette = get_palette(DEFAULT_THEME)
+        self._icon_registry = []
+        self._init_help_info()
         self._setup_ui()
         self.apply_theme(self.palette)
+
+    def _icon_btn(self, widget: QPushButton, name: str, color_kind: str) -> QPushButton:
+        """Registers a button for a Lucide icon that gets recolored on every
+        apply_theme() call (color_kind: "white", "destructive", "dim" or "faint")."""
+        widget.setIconSize(ICON_SIZE)
+        self._icon_registry.append((widget, name, color_kind))
+        return widget
 
     def apply_theme(self, palette: dict):
         self.palette = palette
         p = palette
-        self.setStyleSheet(widget_qss(palette))
-        self.nav_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {p['header']};
-                color: {p['text_dim']};
-                border: none;
-                padding: 6px;
-                outline: none;
-            }}
-            QListWidget::item {{ padding: 10px 12px; border-radius: 4px; margin: 2px 0; }}
-            QListWidget::item:selected {{ background-color: {p['accent']}; color: white; }}
-            QListWidget::item:hover:!selected {{ background-color: {p['panel']}; }}
-        """)
-
+        icon_colors = {
+            "white": p["on_accent"], "destructive": p["danger"],
+            "dim": p["text2"], "faint": p["text3"],
+        }
+        for widget, name, color_kind in self._icon_registry:
+            widget.setIcon(get_icon(name, icon_colors[color_kind]))
         if hasattr(self, "preview_frame"):
             self._apply_preview_theme(p)
-
-        repolish(self)
+        self.sync_appearance()
+        self._apply_help_theme(p)
 
     def _apply_preview_theme(self, p: dict):
         """Styles the Panel Customization preview to match main_window's
@@ -175,35 +184,33 @@ class SettingsPanel(QWidget):
         for header in getattr(self, "_sidebar_category_headers", {}).values():
             header.setFont(QFont(family, 11, QFont.Bold))
 
-        self.preview_navbar.setStyleSheet(f"background-color: {p['bg']}; border-bottom: 1px solid {p['border']};")
-        self.preview_app_title.setStyleSheet(f"color: {p['accent']};")
+        self.preview_navbar.setStyleSheet(f"background: {p['header_grad']}; border-bottom: 1px solid {p['glow_line']};")
+        self.preview_app_title.setStyleSheet(f"color: {p['text']};")
 
         nav_button_style = f"""
             QPushButton {{
                 background: transparent; color: {p['text_dim']};
-                border: none; border-bottom: 2px solid transparent;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                border-radius: 4px;
+                border: none;
+                padding: 7px 16px; font-size: 13px; font-weight: 600;
+                border-radius: 8px;
             }}
             QPushButton:checked {{
                 background-color: {p['selected']}; color: {p['text']};
-                border-bottom: 2px solid {p['accent']};
             }}
         """
         self.hero_list.setStyleSheet(f"""
             QListWidget {{ background: transparent; border: none; padding: 0; outline: none; }}
             QListWidget::item {{
                 color: {p['text_dim']};
-                border: none; border-bottom: 2px solid transparent;
+                border: none; border-radius: 8px;
                 padding: 8px 32px;
             }}
             QListWidget::item:selected {{
                 background-color: {p['selected']}; color: {p['text']};
-                border-bottom: 2px solid {p['accent']};
             }}
         """)
         self.preview_settings_btn.setStyleSheet(nav_button_style.replace(
-            "padding: 8px 20px;", "padding: 8px; font-size: 16px;"
+            "padding: 7px 16px;", "padding: 8px; font-size: 16px;"
         ))
 
         window_btn_style = f"""
@@ -217,30 +224,31 @@ class SettingsPanel(QWidget):
         self.preview_close_btn.setStyleSheet(window_btn_style)
 
         self.preview_window.setStyleSheet(f"""
-            QMainWindow {{ background-color: {p['bg']}; }}
+            QMainWindow {{ background: {p['bg_grad']}; }}
             QMainWindow::separator {{ background: {p['border']}; width: 4px; height: 4px; }}
-            QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: bold; }}
-            QDockWidget::title {{ background: {p['header']}; padding: 6px 8px; border-bottom: 1px solid {p['border']}; }}
+            QDockWidget {{ color: {p['text']}; font-size: 12px; font-weight: 600; }}
+            QDockWidget::title {{ background: {p['header_grad']}; padding: 6px 8px; border-bottom: 1px solid {p['glow_line']}; }}
             QTabBar {{ background: {p['header']}; }}
             QTabBar::tab {{
-                background: {p['panel']}; color: {p['text_dim']};
-                padding: 6px 16px; border: 1px solid {p['border']};
-                border-bottom: none; border-radius: 4px 4px 0 0;
+                background: transparent; color: {p['text_dim']};
+                padding: 6px 16px; border: none; margin-right: 4px;
+                border-radius: 8px;
             }}
             QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
             QMenuBar {{ background: {p['header']}; color: {p['text_dim']}; border-bottom: 1px solid {p['border']}; }}
             QMenuBar::item {{ padding: 4px 10px; }}
-            QMenuBar::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
-            QMenu {{ background: {p['panel']}; color: {p['text_dim']}; border: 1px solid {p['border']}; }}
+            QMenuBar::item:selected {{ background: {p['selected_grad']}; color: {p['text']}; }}
+            QMenu {{ background: {p['header']}; color: {p['text_dim']}; border: 1px solid {p['hover']}; border-radius: 8px; padding: 4px; }}
+            QMenu::item {{ padding: 6px 16px; border-radius: 6px; }}
             QMenu::item:selected {{ background: {p['selected']}; color: {p['text']}; }}
         """)
 
         self.preview_cam_tabs.setStyleSheet(f"""
             QTabWidget::pane {{ border: 1px solid {p['border']}; background: {p['bg']}; }}
             QTabBar::tab {{
-                background: {p['panel']}; color: {p['text_dim']};
-                padding: 6px 16px; border: 1px solid {p['border']};
-                border-bottom: none; border-radius: 4px 4px 0 0;
+                background: transparent; color: {p['text_dim']};
+                padding: 6px 16px; border: none; margin-right: 4px;
+                border-radius: 8px;
             }}
             QTabBar::tab:selected {{ background: {p['selected']}; color: {p['text']}; }}
         """)
@@ -260,7 +268,7 @@ class SettingsPanel(QWidget):
         self.preview_room_selector.setStyleSheet(f"""
             QComboBox {{
                 background-color: {p['panel']}; color: {p['text']};
-                border: 1px solid {p['border']}; border-radius: 4px;
+                border: 1px solid {p['border']}; border-radius: 8px;
                 padding: 4px 8px; font-size: 12px;
             }}
         """)
@@ -299,333 +307,323 @@ class SettingsPanel(QWidget):
         for blank in getattr(self, "_preview_blank_widgets", []):
             blank.setStyleSheet(f"background-color: {p['bg']};")
 
+    # ---------------- shell ----------------
+
+    PAGES = [
+        ("camera", "Camera", "cctv"),
+        ("appearance", "Appearance", "palette"),
+        ("data", "Data & Security", "shield-check"),
+        ("devices", "Saved Devices", "smartphone"),
+        ("custom", "Customization", "sliders-horizontal"),
+        ("help", "Help", "circle-help"),
+    ]
+
     def _setup_ui(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(0)
 
-        title = QLabel("Settings")
-        title.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        title.setProperty("cls", "title")
-        outer.addWidget(title)
-
+        panel = ds.GlassPanel(padding=0, spacing=0)
         body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
+        panel.body_layout.addLayout(body)
 
-        self.nav_list = QListWidget()
-        self.nav_list.setFixedWidth(170)
-        self.nav_list.addItem(QListWidgetItem("Camera"))
-        self.nav_list.addItem(QListWidgetItem("Appearance"))
-        self.nav_list.addItem(QListWidgetItem("Data & Security"))
-        self.nav_list.addItem(QListWidgetItem("Saved Devices"))
-        self.nav_list.addItem(QListWidgetItem("Customization"))
+        nav_col = QWidget()
+        nav_col.setObjectName("settingsNavCol")
+        nl = QVBoxLayout(nav_col)
+        nl.setContentsMargins(16, 16, 16, 16)
+        nl.setSpacing(14)
+        title = ds.text("Settings", "h2")
+        title.setContentsMargins(10, 4, 10, 4)
+        nl.addWidget(title)
+        self.nav_list = ds.SettingsNav([(label, icon) for _k, label, icon in self.PAGES])
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
-        body.addWidget(self.nav_list)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.VLine)
-        sep.setProperty("cls", "sep")
-        body.addWidget(sep)
+        nl.addWidget(self.nav_list, 1)
+        nl.addWidget(self._make_info_toggle(), 0, Qt.AlignLeft)
+        body.addWidget(nav_col)
+        self._nav_col = nav_col
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_camera_page())
-        self.pages.addWidget(self._build_appearance_page())
-        self.pages.addWidget(self._build_data_page())
-        self.pages.addWidget(self._build_devices_page())
-        self.pages.addWidget(self._build_customization_page())
+        builders = {
+            "camera": self._build_camera_page, "appearance": self._build_appearance_page,
+            "data": self._build_data_page, "devices": self._build_devices_page,
+            "custom": self._build_customization_page, "help": self._build_help_page,
+        }
+        for key, _label, _icon in self.PAGES:
+            self.pages.addWidget(builders[key]())
         body.addWidget(self.pages, 1)
+        outer.addWidget(panel)
 
-        outer.addLayout(body, 1)
-
+        ds.on_theme(self, lambda p: nav_col.setStyleSheet(
+            f"QWidget#settingsNavCol {{ border-right: 1px solid {p['border']}; }}"))
         self.nav_list.setCurrentRow(0)
 
+    def _page(self, title: str, desc: str = "", footer: Optional[list] = None):
+        """The kit's settings page: a scrolling body (h2, secondary line) and
+        an optional right-aligned footer above a hairline."""
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 20, 0, 0)
+        pl.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        content = QVBoxLayout(inner)
+        content.setContentsMargins(28, 4, 28, 20)
+        content.setSpacing(0)
+        content.addWidget(ds.text(title, "h2"))
+        if desc:
+            d = ds.text(desc, "secondary", wrap=True)
+            d.setMaximumWidth(560)
+            d.setContentsMargins(0, 4, 0, 0)
+            content.addWidget(d)
+        content.addSpacing(12)
+        scroll.setWidget(inner)
+        pl.addWidget(scroll, 1)
+        if footer:
+            foot = QWidget()
+            foot.setObjectName("pageFooter")
+            fl = QHBoxLayout(foot)
+            fl.setContentsMargins(28, 12, 28, 12)
+            fl.setSpacing(8)
+            fl.addStretch(1)
+            for w in footer:
+                fl.addWidget(w)
+            ds.on_theme(foot, lambda p, f=foot: f.setStyleSheet(
+                f"QWidget#pageFooter {{ border-top: 1px solid {p['border']}; }}"))
+            pl.addWidget(foot)
+        return page, content
+
+    def _row(self, layout: QVBoxLayout, label: str, desc: str = "", *controls) -> QLabel:
+        """A settings Row: label + description on the left, controls on the
+        right, 14px padding and a hairline underneath. Returns the
+        description label so callers can update it."""
+        row = QWidget()
+        row.setObjectName("settingsRow")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 14, 0, 14)
+        rl.setSpacing(24)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(ds.text(label))
+        desc_label = ds.text(desc, "small", wrap=True)
+        desc_label.setVisible(bool(desc))
+        col.addWidget(desc_label)
+        rl.addLayout(col, 1)
+        for c in controls:
+            if isinstance(c, QWidget):
+                rl.addWidget(c)
+            else:
+                rl.addLayout(c)
+        ds.on_theme(row, lambda p, r=row: r.setStyleSheet(
+            f"QWidget#settingsRow {{ border-bottom: 1px solid {p['border']}; }}"))
+        layout.addWidget(row)
+        return desc_label
+
     def _label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setProperty("cls", "muted")
-        return lbl
+        return ds.text(text, "small")
 
     def _page_title(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        lbl.setProperty("cls", "title")
-        return lbl
+        return ds.text(text, "h2")
 
     def _on_nav_changed(self, row: int):
         if row < 0:
             return
         self.pages.setCurrentIndex(row)
-        if row == 2:
+        key = self.PAGES[row][0]
+        if key == "data":
             self._refresh_data_stats()
-        elif row == 3:
+        elif key == "devices":
             self._refresh_detected_devices()
             self._refresh_saved_list()
-        elif row == 4:
+        elif key == "custom":
             self._refresh_customization_status()
+        elif key == "camera":
+            self._load_camera_settings()
 
     # ---------------- Camera page ----------------
 
     def _build_camera_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
-
-        layout.addWidget(self._page_title("Camera"))
-        desc = QLabel(
-            "Tune how detection runs across your cameras. To add, position, enable, "
-            "or rotate the physical cameras themselves, use the Room Setup tab."
-        )
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        conf_row = QHBoxLayout()
-        conf_row.addWidget(self._label("Detection confidence"))
-        self.confidence_input = QDoubleSpinBox()
-        self.confidence_input.setRange(0.05, 0.95)
-        self.confidence_input.setSingleStep(0.05)
-        self.confidence_input.setValue(self.app_settings.detection_confidence)
-        conf_row.addWidget(self.confidence_input)
-        conf_row.addStretch()
-        layout.addLayout(conf_row)
-        conf_hint = QLabel("Higher = fewer false positives, but may miss partially hidden items.")
-        conf_hint.setProperty("cls", "hint")
-        layout.addWidget(conf_hint)
-
-        skip_row = QHBoxLayout()
-        skip_row.addWidget(self._label("Detect every N frames"))
-        self.frame_skip_input = QSpinBox()
-        self.frame_skip_input.setRange(1, 15)
-        self.frame_skip_input.setValue(self.app_settings.detection_frame_skip)
-        skip_row.addWidget(self.frame_skip_input)
-        skip_row.addStretch()
-        layout.addLayout(skip_row)
-        skip_hint = QLabel("Higher = less CPU usage, slower to notice new items.")
-        skip_hint.setProperty("cls", "hint")
-        layout.addWidget(skip_hint)
-
-        self.dewarp_default_check = QCheckBox("Enable fisheye/360° dewarping by default")
-        self.dewarp_default_check.setChecked(self.app_settings.dewarp_default)
-        layout.addWidget(self.dewarp_default_check)
-
-        layout.addStretch()
-
-        self.camera_status_label = QLabel("")
-        self.camera_status_label.setProperty("cls", "status")
-        layout.addWidget(self.camera_status_label)
-
-        save_btn = QPushButton("Save Camera Settings")
-        save_btn.setProperty("cls", "primary")
-        save_btn.clicked.connect(self._on_save_camera_settings)
-        layout.addWidget(save_btn)
-
+        save = ds.Button("Save camera settings", "primary")
+        save.clicked.connect(self._on_save_camera_settings)
+        page, layout = self._page(
+            "Camera", "Tune how detection runs. To add or position cameras, use the Cameras tab and Room setup.",
+            [save])
+        self.detection_model_select = ds.Select()
+        for weight_file, label in DETECTION_MODEL_CHOICES.items():
+            self.detection_model_select.addItem(label, weight_file)
+        self._row(layout, "Detection model",
+                  "Larger/newer models find more items but run slower. Switching downloads the "
+                  "weights the first time.", self.detection_model_select)
+        self.confidence_stepper = ds.NumberInput(0.05, 0.95, 0.05, 2)
+        self.confidence_input = self.confidence_stepper.spin
+        self._row(layout, "Detection confidence",
+                  "Higher = fewer false positives, but may miss partially hidden items.", self.confidence_stepper)
+        self.frame_skip_stepper = ds.NumberInput(1, 15, 1, integer=True)
+        self.frame_skip_input = self.frame_skip_stepper.spin
+        self._row(layout, "Detect every N frames",
+                  "Higher = less CPU usage, slower to notice new items.", self.frame_skip_stepper)
+        self.dewarp_default_switch = ds.Switch()
+        self._row(layout, "Fisheye / 360° dewarping", "Apply by default to every camera.",
+                  self.dewarp_default_switch)
+        layout.addStretch(1)
+        self._load_camera_settings()
         return page
 
+    def _load_camera_settings(self):
+        self.app_settings = load_app_settings()
+        model_index = self.detection_model_select.findData(self.app_settings.detection_model)
+        self.detection_model_select.setCurrentIndex(max(0, model_index))
+        self.confidence_input.setValue(self.app_settings.detection_confidence)
+        self.frame_skip_input.setValue(self.app_settings.detection_frame_skip)
+        self.dewarp_default_switch.setChecked(self.app_settings.dewarp_default)
+
     def _on_save_camera_settings(self):
+        self.app_settings = load_app_settings()
+        self.app_settings.detection_model = self.detection_model_select.currentData()
         self.app_settings.detection_confidence = self.confidence_input.value()
         self.app_settings.detection_frame_skip = self.frame_skip_input.value()
-        self.app_settings.dewarp_default = self.dewarp_default_check.isChecked()
+        self.app_settings.dewarp_default = self.dewarp_default_switch.isChecked()
         save_app_settings(self.app_settings)
-        self.camera_status_label.setText("Saved. Applies immediately.")
+        ds.toast(self, "Saved. Applies immediately.")
         self.settings_updated.emit()
 
     # ---------------- Appearance page ----------------
 
     def _build_appearance_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
+        page, layout = self._page(
+            "Appearance", "Pick a mode and accent. Found It uses Segoe UI throughout unless you choose another font.")
 
-        layout.addWidget(self._page_title("Appearance"))
-        desc = QLabel("Pick the font used throughout the app, from what's installed on this machine.")
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
+        layout.addSpacing(8)
+        layout.addWidget(ds.text("Mode", "eyebrow"))
+        layout.addSpacing(10)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(10)
+        self.mode_swatches = {}
+        for light, label in ((False, "Dark"), (True, "Light")):
+            sw = ds.ThemeSwatch(get_palette(DEFAULT_THEME), label)
+            sw.setMaximumWidth(205)
+            sw.clicked.connect(lambda _c, l=light: self._set_theme(light=l))
+            mode_row.addWidget(sw)
+            self.mode_swatches[light] = sw
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
 
-        self.font_filter_input = QLineEdit()
-        self.font_filter_input.setPlaceholderText("Filter fonts...")
-        self.font_filter_input.textChanged.connect(self._on_font_filter_changed)
-        layout.addWidget(self.font_filter_input)
+        layout.addSpacing(22)
+        layout.addWidget(ds.text("Accent", "eyebrow"))
+        layout.addSpacing(10)
+        accent_row = QGridLayout()
+        accent_row.setSpacing(10)
+        self.accent_swatches = {}
+        for i, accent in enumerate(ACCENT_NAMES):
+            sw = ds.ThemeSwatch(get_palette(accent), accent)
+            sw.clicked.connect(lambda _c, a=accent: self._set_theme(accent=a))
+            accent_row.addWidget(sw, 0, i)
+            self.accent_swatches[accent] = sw
+        layout.addLayout(accent_row)
 
-        self.font_list = QListWidget()
-        self._populate_font_list()
-        layout.addWidget(self.font_list)
+        layout.addSpacing(22)
+        layout.addWidget(ds.text("Font", "eyebrow"))
+        layout.addSpacing(4)
+        self.font_select = ds.Select()
+        self.font_select.setMinimumWidth(240)
+        self.font_select.addItem("Segoe UI (default)", "Segoe UI")
+        for family in QFontDatabase().families():
+            if not family.startswith("@") and family != "Segoe UI":
+                self.font_select.addItem(family, family)
+        index = self.font_select.findData(self.app_settings.font_family)
+        self.font_select.setCurrentIndex(max(index, 0))
+        self.font_select.currentIndexChanged.connect(self._on_font_changed)
+        self._row(layout, "Interface font", "Any font installed on this machine.", self.font_select)
+        layout.addStretch(1)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setProperty("cls", "sep")
-        layout.addWidget(sep)
-
-        themes_title = QLabel("Themes")
-        themes_title.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        themes_title.setProperty("cls", "title")
-        layout.addWidget(themes_title)
-
-        themes_desc = QLabel(
-            "Each theme colors the nav bar, docks, tabs, and buttons with shades of one color."
-        )
-        themes_desc.setProperty("cls", "muted")
-        themes_desc.setWordWrap(True)
-        layout.addWidget(themes_desc)
-
-        themes_grid = QGridLayout()
-        themes_grid.setSpacing(8)
-        self.theme_button_group = QButtonGroup(self)
-        self.theme_button_group.setExclusive(True)
-        for i, name in enumerate(THEME_NAMES):
-            btn = self._build_theme_swatch(name)
-            self.theme_button_group.addButton(btn)
-            themes_grid.addWidget(btn, i // 4, i % 4)
-        layout.addLayout(themes_grid)
-
-        layout.addStretch()
-
-        self.appearance_status_label = QLabel("")
-        self.appearance_status_label.setProperty("cls", "status")
-        layout.addWidget(self.appearance_status_label)
-
-        save_btn = QPushButton("Save Appearance Settings")
-        save_btn.setProperty("cls", "primary")
-        save_btn.clicked.connect(self._on_save_appearance_settings)
-        layout.addWidget(save_btn)
-
+        self.appearance_status_label = ds.text("", "status")
         return page
 
-    def _populate_font_list(self, filter_text: str = ""):
-        self.font_list.clear()
-        families = [f for f in QFontDatabase().families() if not f.startswith("@")]
-        filter_text = filter_text.strip().lower()
-        current_row = -1
-        for family in families:
-            if filter_text and filter_text not in family.lower():
-                continue
-            item = QListWidgetItem(f"{family}  —  The quick brown fox jumps over the lazy dog")
-            item.setFont(QFont(family, 12))
-            item.setData(Qt.UserRole, family)
-            self.font_list.addItem(item)
-            if family == self.app_settings.font_family:
-                current_row = self.font_list.count() - 1
-        if current_row >= 0:
-            self.font_list.setCurrentRow(current_row)
-
-    def _on_font_filter_changed(self, text: str):
-        self._populate_font_list(text)
-
-    def _build_theme_swatch(self, name: str) -> QPushButton:
-        p = get_palette(name)
-        btn = QPushButton(name)
-        btn.setCheckable(True)
-        btn.setChecked(name == self.app_settings.theme)
-        btn.setMinimumHeight(48)
-        btn.setProperty("theme_name", name)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {p['panel']}, stop:0.33 {p['selected']},
-                    stop:0.66 {p['hover']}, stop:1 {p['accent']});
-                border: 2px solid {p['border']}; border-radius: 6px;
-                color: {p['text']}; font-weight: bold; font-size: 12px;
-                padding: 6px;
-            }}
-            QPushButton:checked {{ border: 2px solid {p['accent']}; }}
-            QPushButton:hover {{ border: 2px solid {p['accent_hover']}; }}
-        """)
-        return btn
-
-    def _on_save_appearance_settings(self):
-        item = self.font_list.currentItem()
-        if item is None:
+    def sync_appearance(self):
+        """Mirror the saved theme in the swatches (e.g. after Ctrl+K's
+        light/dark switch)."""
+        if not hasattr(self, "mode_swatches"):
             return
-        family = item.data(Qt.UserRole)
-        self.app_settings.font_family = family
+        light, accent = theme_parts(self.app_settings.theme)
+        for is_light, sw in self.mode_swatches.items():
+            sw.preview = get_palette(theme_name(is_light, accent))
+            sw.setChecked(is_light == light)
+            sw.update()
+        for name, sw in self.accent_swatches.items():
+            sw.preview = get_palette(theme_name(light, name))
+            sw.setChecked(name == accent)
+            sw.update()
 
-        theme_btn = self.theme_button_group.checkedButton()
-        if theme_btn is not None:
-            self.app_settings.theme = theme_btn.property("theme_name")
-
+    def _set_theme(self, light: Optional[bool] = None, accent: Optional[str] = None):
+        cur_light, cur_accent = theme_parts(self.app_settings.theme)
+        light = cur_light if light is None else light
+        accent = cur_accent if accent is None else accent
+        self.app_settings = load_app_settings()
+        self.app_settings.theme = theme_name(light, accent)
         save_app_settings(self.app_settings)
+        self.sync_appearance()
+        self.settings_updated.emit()
 
+    def _on_font_changed(self, _index: int):
+        family = self.font_select.currentData()
+        self.app_settings = load_app_settings()
+        self.app_settings.font_family = family
+        save_app_settings(self.app_settings)
         app = QApplication.instance()
         if app is not None:
             app.setFont(QFont(family, 10))
+        ds.toast(self, f"Font changed to {family}.")
+        self.settings_updated.emit()
 
-        self.appearance_status_label.setText("Saved. Some titles pick up the new font on next launch.")
+    def _on_save_appearance_settings(self):
         self.settings_updated.emit()
 
     # ---------------- Data & Security page ----------------
 
     def _build_data_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
+        page, layout = self._page(
+            "Data & security", "Everything is stored only on this machine. Nothing is uploaded anywhere.")
 
-        layout.addWidget(self._page_title("Data & Security"))
-        desc = QLabel("Everything below is stored only on this machine. Nothing is uploaded anywhere.")
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        self.data_dir_label = QLabel(f"Data folder: {DATA_DIR}")
-        self.data_dir_label.setProperty("cls", "muted")
-        self.data_dir_label.setWordWrap(True)
+        open_btn = ds.Button("Open", "secondary", "folder-open", size="sm")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(DATA_DIR))))
+        self.data_dir_label = self._row(layout, "Data folder", "", open_btn)
+        self.data_dir_label.setText(str(DATA_DIR))
+        self.data_dir_label.setProperty("cls", "mono")
         self.data_dir_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.data_dir_label)
+        self.data_dir_label.show()
 
-        self.stats_label = QLabel("")
-        self.stats_label.setProperty("cls", "muted")
-        self.stats_label.setWordWrap(True)
-        layout.addWidget(self.stats_label)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setProperty("cls", "sep")
-        layout.addWidget(sep)
-
-        clear_history_btn = QPushButton("Clear Detection History")
-        clear_history_btn.setProperty("cls", "secondary")
+        clear_history_btn = ds.Button("Clear", "danger", "trash-2", size="sm")
         clear_history_btn.clicked.connect(self._on_clear_history)
-        layout.addWidget(clear_history_btn)
+        self.history_desc = self._row(layout, "Detection history", "", clear_history_btn)
 
-        clear_snapshots_btn = QPushButton("Delete All Snapshots")
-        clear_snapshots_btn.setProperty("cls", "secondary")
-        clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
-        layout.addWidget(clear_snapshots_btn)
-
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setProperty("cls", "sep")
-        layout.addWidget(sep2)
-
-        room_data_hint = QLabel(
-            "Room data (every saved room's size, zones, and cameras) is always kept in "
-            "data/room_profiles.json. Export it to a .json file as a backup or to move your "
-            "rooms to another computer; import adds the rooms from a file without touching "
-            "what you already have."
+        prune_snapshots_btn = ds.Button("Remove orphaned", "ghost", size="sm")
+        prune_snapshots_btn.setToolTip(
+            "Delete snapshot images that no tracked item refers to any more. "
+            "Snapshots still in use are kept."
         )
-        room_data_hint.setProperty("cls", "hint")
-        room_data_hint.setWordWrap(True)
-        layout.addWidget(room_data_hint)
+        prune_snapshots_btn.clicked.connect(self._on_prune_snapshots)
+        clear_snapshots_btn = ds.Button("Delete all", "danger", "trash-2", size="sm")
+        clear_snapshots_btn.clicked.connect(self._on_clear_snapshots)
+        self.snapshots_desc = self._row(layout, "Snapshots", "", prune_snapshots_btn, clear_snapshots_btn)
 
-        room_data_row = QHBoxLayout()
-        export_rooms_btn = QPushButton("Export Room Data...")
-        export_rooms_btn.setProperty("cls", "secondary")
+        export_rooms_btn = ds.Button("Export…", "secondary", "download", size="sm")
         export_rooms_btn.clicked.connect(self._on_export_rooms)
-        room_data_row.addWidget(export_rooms_btn)
-
-        import_rooms_btn = QPushButton("Import Room Data...")
-        import_rooms_btn.setProperty("cls", "secondary")
+        import_rooms_btn = ds.Button("Import…", "secondary", "upload", size="sm")
         import_rooms_btn.clicked.connect(self._on_import_rooms)
-        room_data_row.addWidget(import_rooms_btn)
-        layout.addLayout(room_data_row)
+        self._row(layout, "Room data",
+                  "Back up or move every saved room's size, zones and cameras. Import adds rooms "
+                  "without touching the ones you have.", export_rooms_btn, import_rooms_btn)
 
-        layout.addStretch()
-
-        self.data_status_label = QLabel("")
-        self.data_status_label.setProperty("cls", "status")
+        self.stats_label = ds.text("", "mono", selectable=True)
+        self.stats_label.setContentsMargins(0, 14, 0, 0)
+        layout.addWidget(self.stats_label)
+        self.data_status_label = ds.text("", "status", wrap=True)
+        self.data_status_label.setContentsMargins(0, 8, 0, 0)
         layout.addWidget(self.data_status_label)
-
+        layout.addStretch(1)
         return page
 
     def _refresh_data_stats(self):
@@ -641,12 +639,12 @@ class SettingsPanel(QWidget):
                     snap_count += 1
                     snap_bytes += f.stat().st_size
 
-        snap_mb = snap_bytes / (1024 * 1024)
-        self.stats_label.setText(
-            f"Detected item records: {item_count}\n"
-            f"Snapshot images: {snap_count} ({snap_mb:.1f} MB)\n"
-            f"Database file: {DB_PATH}"
-        )
+        self.history_desc.setText(f"{item_count:,} tracked item record{'s' if item_count != 1 else ''}")
+        self.history_desc.show()
+        self.snapshots_desc.setText(
+            f"{snap_count:,} image{'s' if snap_count != 1 else ''} · {snap_bytes / (1024 * 1024):.1f} MB")
+        self.snapshots_desc.show()
+        self.stats_label.setText(f"Database: {DB_PATH}")
 
     def _on_clear_history(self):
         confirm = QMessageBox.question(
@@ -657,10 +655,21 @@ class SettingsPanel(QWidget):
         if confirm != QMessageBox.Yes:
             return
         db = Database()
-        db.clear_all_items()
+        # The rows own their snapshot images; deleting the rows without the
+        # files left the images stranded on disk with nothing referencing them.
+        orphaned = db.clear_all_items()
         db.close()
+        removed = 0
+        for path in orphaned:
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
         self._refresh_data_stats()
-        self.data_status_label.setText("Detection history cleared.")
+        self.data_status_label.setText(
+            f"Detection history cleared ({removed} snapshot(s) removed)."
+        )
 
     def _on_clear_snapshots(self):
         confirm = QMessageBox.question(
@@ -679,8 +688,42 @@ class SettingsPanel(QWidget):
                         deleted += 1
                     except OSError:
                         pass
+        # Every stored path now points at a file that's gone, so drop the
+        # references rather than leaving rows advertising missing images.
+        db = Database()
+        db.clear_snapshot_references()
+        db.close()
         self._refresh_data_stats()
         self.data_status_label.setText(f"Deleted {deleted} snapshot(s).")
+
+    def _on_prune_snapshots(self):
+        """Delete snapshot images no row references any more - the backlog
+        left behind by the churn bug, which nothing will ever display."""
+        db = Database()
+        referenced = db.get_referenced_snapshots()
+        db.close()
+
+        referenced = {os.path.normcase(os.path.abspath(p)) for p in referenced}
+        deleted = 0
+        freed = 0
+        if SNAPSHOTS_DIR.exists():
+            for f in SNAPSHOTS_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                if os.path.normcase(os.path.abspath(str(f))) in referenced:
+                    continue
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    deleted += 1
+                    freed += size
+                except OSError:
+                    pass
+
+        self._refresh_data_stats()
+        self.data_status_label.setText(
+            f"Removed {deleted} orphaned snapshot(s), freeing {freed / (1024 * 1024):.1f} MB."
+        )
 
     def _on_export_rooms(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -693,6 +736,7 @@ class SettingsPanel(QWidget):
             with open(path, "w") as f:
                 json.dump(profiles_to_list(profiles), f, indent=2)
             self.data_status_label.setText(f"Exported {len(profiles)} room(s) to {path}.")
+            ds.toast(self, f"Exported {len(profiles)} room(s).")
         except OSError as e:
             self.data_status_label.setText(f"Couldn't export: {e}")
 
@@ -736,88 +780,80 @@ class SettingsPanel(QWidget):
         self.data_status_label.setText(f"Imported {len(imported)} room(s) as new profiles.")
         self.rooms_imported.emit()
 
+    def _build_help_page(self) -> QWidget:
+        """Where the first-run tutorial and the release notes live once
+        they've been dismissed."""
+        page, layout = self._page("Help", "The guided tour and what changed in each version.")
+        release = current_release()
+        self._row(layout, "Version", f"Found It {APP_VERSION}" + (f" · {release['date']}" if release.get("date") else ""))
+        self.replay_tutorial_btn = ds.Button("Replay the tutorial", "primary", "play", size="sm")
+        self.replay_tutorial_btn.clicked.connect(self.tutorial_requested.emit)
+        self._row(layout, "Tutorial",
+                  "Building your room, adding cameras, and scanning this PC for pictures you can't find.",
+                  self.replay_tutorial_btn)
+        self.whats_new_btn = ds.Button("What's new", "secondary", "sparkles", size="sm")
+        self.whats_new_btn.clicked.connect(self.whats_new_requested.emit)
+        self._row(layout, "Release notes", "What was added and what changed in this version.", self.whats_new_btn)
+        layout.addStretch(1)
+        return page
+
     # ---------------- Saved Devices page ----------------
 
     def _build_devices_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
+        page, layout = self._page(
+            "Saved devices", "Save phones visible over ADB with a nickname to reconnect without rescanning.")
 
-        layout.addWidget(self._page_title("Saved Devices"))
-        desc = QLabel(
-            "Devices currently visible over ADB (USB-C, debugging enabled) can be saved "
-            "with a nickname so you can reconnect from here without rescanning."
-        )
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        layout.addWidget(self._label("Detected right now"))
-        self.detected_list = QListWidget()
-        self.detected_list.setMaximumHeight(90)
-        layout.addWidget(self.detected_list)
-
-        detect_row = QHBoxLayout()
-        self.refresh_detected_btn = QPushButton("Refresh")
-        self.refresh_detected_btn.setProperty("cls", "secondary")
+        layout.addSpacing(8)
+        head = QHBoxLayout()
+        head.addWidget(ds.text("Detected now", "eyebrow"))
+        head.addStretch(1)
+        self.refresh_detected_btn = ds.Button("Refresh", "ghost", "refresh-cw", size="sm")
         self.refresh_detected_btn.clicked.connect(self._refresh_detected_devices)
-        detect_row.addWidget(self.refresh_detected_btn)
-
-        self.nickname_input = QLineEdit()
-        self.nickname_input.setPlaceholderText("Nickname (e.g. My Phone)")
-        detect_row.addWidget(self.nickname_input)
-
-        self.save_device_btn = QPushButton("Save Selected")
-        self.save_device_btn.setProperty("cls", "primary")
+        head.addWidget(self.refresh_detected_btn)
+        layout.addLayout(head)
+        layout.addSpacing(6)
+        self.detected_list = ds.RowList("No devices found. Connect via USB-C with debugging enabled.", "usb")
+        self.detected_list.setFixedHeight(120)
+        layout.addWidget(self.detected_list)
+        layout.addSpacing(8)
+        self.nickname_input = ds.TextInput("Nickname (e.g. My Phone)", size="sm")
+        self.nickname_input.setFixedWidth(240)
+        self.save_device_btn = ds.Button("Save", "primary", size="sm")
         self.save_device_btn.clicked.connect(self._on_save_device)
-        detect_row.addWidget(self.save_device_btn)
-        layout.addLayout(detect_row)
+        layout.addLayout(ds.hbox(None, self.nickname_input, self.save_device_btn))
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setProperty("cls", "sep")
-        layout.addWidget(sep)
-
-        layout.addWidget(self._label("Saved"))
-        self.saved_list = QListWidget()
+        layout.addSpacing(22)
+        layout.addWidget(ds.text("Saved", "eyebrow"))
+        layout.addSpacing(6)
+        self.saved_list = ds.RowList("No saved devices yet.", "star")
+        self.saved_list.setMinimumHeight(140)
         self.saved_list.itemClicked.connect(self._on_saved_list_clicked)
-        layout.addWidget(self.saved_list)
-
-        saved_row = QHBoxLayout()
-        self.connect_saved_btn = QPushButton("Connect")
-        self.connect_saved_btn.setProperty("cls", "primary")
+        layout.addWidget(self.saved_list, 1)
+        layout.addSpacing(8)
+        self.connect_saved_btn = ds.Button("Connect", "secondary", "plug", size="sm")
         self.connect_saved_btn.clicked.connect(self._on_connect_saved)
-        saved_row.addWidget(self.connect_saved_btn)
-
-        self.remove_saved_btn = QPushButton("Remove")
-        self.remove_saved_btn.setProperty("cls", "secondary")
+        self.remove_saved_btn = ds.Button("Remove", "ghost", size="sm")
         self.remove_saved_btn.clicked.connect(self._on_remove_saved)
-        saved_row.addWidget(self.remove_saved_btn)
-        layout.addLayout(saved_row)
-
-        self.devices_status_label = QLabel("")
-        self.devices_status_label.setProperty("cls", "status")
-        layout.addWidget(self.devices_status_label)
-
+        self.devices_status_label = ds.text("", "status", wrap=True)
+        layout.addLayout(ds.hbox(self.devices_status_label, self.connect_saved_btn, self.remove_saved_btn,
+                                 stretch_at=0))
         return page
 
     def _refresh_detected_devices(self):
         adb = ADBHandler()
         self.detected_list.clear()
         if not adb.is_available():
-            self.devices_status_label.setText("ADB not found — install Android platform-tools.")
+            self.devices_status_label.setText("ADB not found - install Android platform-tools.")
+            self.detected_list.set_empty("ADB not found - install Android platform-tools.", "usb")
             self._detected_devices = []
             return
 
         self._detected_devices = adb.get_devices()
         for dev in self._detected_devices:
-            self.detected_list.addItem(QListWidgetItem(f"{dev.model}  ({dev.serial})"))
-
-        if not self._detected_devices:
-            self.devices_status_label.setText("No devices found. Connect via USB-C with debugging enabled.")
-        else:
-            self.devices_status_label.setText("")
+            self.detected_list.addItem(ds.make_row("item", icon="smartphone", title=dev.model, meta=dev.serial))
+        if self._detected_devices:
+            self.detected_list.setCurrentRow(0)
+        self.devices_status_label.setText("")
 
     def _on_save_device(self):
         row = self.detected_list.currentRow()
@@ -842,7 +878,7 @@ class SettingsPanel(QWidget):
     def _refresh_saved_list(self):
         self.saved_list.clear()
         for i, dev in enumerate(self.saved_devices):
-            item = QListWidgetItem(f"{dev['nickname']}  ({dev['serial']})")
+            item = ds.make_row("item", icon="star", title=dev["nickname"], meta=dev["serial"])
             item.setData(Qt.UserRole, i)
             self.saved_list.addItem(item)
         self._selected_saved_index = None
@@ -870,70 +906,69 @@ class SettingsPanel(QWidget):
     # ---------------- Customization page ----------------
 
     def _build_customization_page(self) -> QWidget:
+        self.custom_stack = QStackedWidget()
+
+        page, layout = self._page(
+            "Customization",
+            'Turn the "Found It" title into a shortcut for the button you use most, and rearrange panels.')
+        find_shortcut_btn = ds.Button("Find shortcut", "primary", "mouse-pointer-click", size="sm")
+        find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
+        clear_shortcut_btn = ds.Button("Clear", "ghost", size="sm")
+        clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
+        self.current_shortcut_label = self._row(
+            layout, "Title shortcut", "No shortcut set.", find_shortcut_btn, clear_shortcut_btn)
+        self._add_help(
+            None,
+            "Find shortcut takes you back to the app. Double-click any button there to bind "
+            "it. Clicking the tabs across the top still switches tabs as normal.",
+            layout=layout,
+        )
+        self._row(layout, "Command palette", "Search rooms, items, devices and actions from anywhere.",
+                  ds.hbox(ds.Kbd("Ctrl"), ds.Kbd("K"), spacing=4))
+        open_editor = ds.Button("Open layout editor", "secondary", "layout-panel-left", size="sm")
+        open_editor.clicked.connect(self._open_layout_editor)
+        self._row(layout, "Panel layout", "Drag tabs and the Cameras / Found items panels in a live preview.",
+                  open_editor)
+        layout.addStretch(1)
+        self.custom_stack.addWidget(page)
+
+        # The layout editor (the live, drag-and-drop preview) as its own view.
+        editor = QWidget()
+        el = QVBoxLayout(editor)
+        el.setContentsMargins(28, 20, 28, 16)
+        el.setSpacing(10)
+        back = ds.Button("Customization", "ghost", "arrow-left", size="sm")
+        back.clicked.connect(lambda: self.custom_stack.setCurrentIndex(0))
+        el.addWidget(back, 0, Qt.AlignLeft)
+        el.addWidget(ds.text("Layout editor", "h2"))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(8)
+        self._build_panel_customization_section(inner_layout)
+        inner_layout.addStretch(1)
+        scroll.setWidget(inner)
+        el.addWidget(scroll, 1)
+        self.custom_stack.addWidget(editor)
+        return self.custom_stack
 
-        page = QWidget()
-        scroll.setWidget(page)
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 4, 16, 4)
-        layout.setSpacing(8)
-
-        layout.addWidget(self._page_title("Customization"))
-        desc = QLabel(
-            "Turn the \"Found It\" title in the nav bar into a shortcut for the "
-            "button you use most."
-        )
-        desc.setProperty("cls", "muted")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        self.current_shortcut_label = self._label("")
-        layout.addWidget(self.current_shortcut_label)
-
-        find_row = QHBoxLayout()
-        find_shortcut_btn = QPushButton("Find Shortcut")
-        find_shortcut_btn.setProperty("cls", "primary")
-        find_shortcut_btn.clicked.connect(self.find_shortcut_requested.emit)
-        find_row.addWidget(find_shortcut_btn)
-
-        clear_shortcut_btn = QPushButton("Clear Shortcut")
-        clear_shortcut_btn.setProperty("cls", "secondary")
-        clear_shortcut_btn.clicked.connect(self._on_clear_shortcut)
-        find_row.addWidget(clear_shortcut_btn)
-        find_row.addStretch()
-        layout.addLayout(find_row)
-
-        find_hint = QLabel(
-            "This takes you back to the app. Double-click any button there to bind it. "
-            "Clicking the tabs across the top still switches tabs as normal — it won't "
-            "be picked up as the shortcut."
-        )
-        find_hint.setProperty("cls", "hint")
-        find_hint.setWordWrap(True)
-        layout.addWidget(find_hint)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setProperty("cls", "sep")
-        layout.addWidget(sep)
-
-        self._build_panel_customization_section(layout)
-
-        layout.addStretch()
-
-        return scroll
+    def _open_layout_editor(self):
+        self.custom_stack.setCurrentIndex(1)
+        self._reload_panel_customization_preview()
 
     def _refresh_customization_status(self):
         self.app_settings = load_app_settings()
         action = self.app_settings.title_hotkey_action
         if action.startswith("button:"):
             label = self.app_settings.title_hotkey_label or action[len("button:"):]
-            self.current_shortcut_label.setText(f"Currently bound to: {label}")
+            self.current_shortcut_label.setText(f"Currently opens: {label}")
         else:
             self.current_shortcut_label.setText("No shortcut set.")
-        self._reload_panel_customization_preview()
+        if hasattr(self, "custom_stack") and self.custom_stack.currentIndex() == 1:
+            self._reload_panel_customization_preview()
 
     def _on_clear_shortcut(self):
         self.app_settings.title_hotkey_action = "none"
@@ -1014,7 +1049,7 @@ class SettingsPanel(QWidget):
 
         nav_row.addStretch()
 
-        self.preview_settings_btn = QPushButton("⚙")
+        self.preview_settings_btn = self._icon_btn(QPushButton(), "settings", "faint")
         self.preview_settings_btn.setCheckable(True)
         self.preview_settings_btn.setChecked(True)
         self.preview_settings_btn.setEnabled(False)
@@ -1023,17 +1058,17 @@ class SettingsPanel(QWidget):
 
         nav_row.addSpacing(12)
 
-        self.preview_min_btn = QPushButton("─")
+        self.preview_min_btn = self._icon_btn(QPushButton(), "minus", "faint")
         self.preview_min_btn.setFixedSize(44, 48)
         self.preview_min_btn.setEnabled(False)
         nav_row.addWidget(self.preview_min_btn)
 
-        self.preview_max_btn = QPushButton("☐")
+        self.preview_max_btn = self._icon_btn(QPushButton(), "square", "faint")
         self.preview_max_btn.setFixedSize(44, 48)
         self.preview_max_btn.setEnabled(False)
         nav_row.addWidget(self.preview_max_btn)
 
-        self.preview_close_btn = QPushButton("✕")
+        self.preview_close_btn = self._icon_btn(QPushButton(), "x", "faint")
         self.preview_close_btn.setFixedSize(44, 48)
         self.preview_close_btn.setEnabled(False)
         nav_row.addWidget(self.preview_close_btn)
@@ -1108,7 +1143,7 @@ class SettingsPanel(QWidget):
         map_header.addStretch()
 
         self.preview_status_indicator = QLabel("Scanning...")
-        self.preview_status_indicator.setStyleSheet("color: #4caf50; font-size: 11px;")
+        self.preview_status_indicator.setStyleSheet(f"color: {self.palette['success']}; font-size: 11px;")
         map_header.addWidget(self.preview_status_indicator)
         center_layout.addLayout(map_header)
 
@@ -1199,13 +1234,13 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.panel_customization_status_label)
 
         buttons_row = QHBoxLayout()
-        save_project_btn = QPushButton("Save Project")
+        save_project_btn = self._icon_btn(QPushButton(" Save Project"), "save", "white")
         save_project_btn.setProperty("cls", "primary")
         save_project_btn.clicked.connect(self._on_save_project)
         buttons_row.addWidget(save_project_btn, 1)
 
-        clear_panels_btn = QPushButton("Clear Panels")
-        clear_panels_btn.setProperty("cls", "secondary")
+        clear_panels_btn = self._icon_btn(QPushButton(" Clear Panels"), "trash-2", "destructive")
+        clear_panels_btn.setProperty("cls", "destructive")
         clear_panels_btn.clicked.connect(self._on_clear_panels)
         buttons_row.addWidget(clear_panels_btn)
         layout.addLayout(buttons_row)
@@ -1420,8 +1455,8 @@ class SettingsPanel(QWidget):
         hidden/reparented widget can no longer be trusted to report its own
         size. title labels a specific piece within the category (e.g.
         "Search" inside the File Search tab) - leave it None for a widget
-        that already carries its own visible title (a dock, a
-        CollapsibleSection), so it doesn't get labeled twice. restore_fn puts
+        that already carries its own visible title (a dock), so it doesn't
+        get labeled twice. restore_fn puts
         the widget back where it came from when its thumbnail is dragged
         onto the preview."""
         insert_at = self.sidebar_content_layout.count() - 1  # keep the trailing stretch last
@@ -1519,9 +1554,11 @@ class SettingsPanel(QWidget):
         self._restore_screen_if_needed("room_setup")
         panel.dock_host.setCentralWidget(canvas_area)
 
-    def _restore_room_setup_section(self, panel: RoomSetupPanel, section: QWidget, idx: int):
+    def _restore_room_setup_dock(self, panel: RoomSetupPanel, dock: QDockWidget):
         self._restore_screen_if_needed("room_setup")
-        panel._right_container_layout.insertWidget(idx, section)
+        panel.dock_host.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.setFloating(False)
+        dock.show()
 
     def _restore_file_tab(self, panel: FileSearchPanel, widget: QWidget, label: str, idx: int):
         self._restore_screen_if_needed("file")
@@ -1530,10 +1567,9 @@ class SettingsPanel(QWidget):
     def _split_room_setup_panel(self, panel: RoomSetupPanel) -> list:
         """(title_or_None, widget, size, restore_fn) per Room Setup's natural
         sections, instead of one solid block - the profile/dimensions/canvas
-        area, then each already-titled CollapsibleSection (Cameras,
-        Zones / Furniture, Drawers, Detected Objects) pulled out
-        individually. Each restore_fn puts its piece back at the same spot
-        in the panel it came from."""
+        area, then each already-titled dock (Zones / Furniture, Drawers,
+        Detected Objects) pulled out individually. Each restore_fn puts its
+        piece back into the dock area it came from."""
         items = []
         # takeCentralWidget() (not centralWidget()) - it also clears
         # dock_host's own record of having a central widget. Reading the
@@ -1548,15 +1584,16 @@ class SettingsPanel(QWidget):
                 "Room Setup", canvas_area, canvas_area.size(),
                 lambda p=panel, c=canvas_area: self._restore_room_setup_canvas(p, c),
             ))
-        for idx, section in enumerate(getattr(panel, "_collapsible_sections", [])):
-            size = section.size()
-            # Same reason as takeCentralWidget() above: tell the layout the
-            # section is gone before it gets ripped out, so re-inserting it
-            # later isn't fighting a stale QLayoutItem still pointing at it.
-            panel._right_container_layout.removeWidget(section)
+        for dock in getattr(panel, "_room_docks", []):
+            size = dock.size()
+            # removeDockWidget() unregisters it from dock_host's own dock
+            # manager before _wrap_as_thumbnail reparents it - otherwise a
+            # later addDockWidget() in restore fights a stale internal
+            # record of where it used to live.
+            panel.dock_host.removeDockWidget(dock)
             items.append((
-                None, section, size,
-                lambda p=panel, s=section, i=idx: self._restore_room_setup_section(p, s, i),
+                None, dock, size,
+                lambda p=panel, d=dock: self._restore_room_setup_dock(p, d),
             ))
         return items
 
