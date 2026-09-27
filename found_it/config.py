@@ -21,7 +21,20 @@ INDEX_DB_PATH = DB_DIR / "file_index.db"
 CAMERA_RESOLUTION = (640, 480)
 CAMERA_FPS = 15
 
-YOLO_MODEL = str(BASE_DIR / "yolov8n.pt")
+# Weight file -> label shown in the model picker. All are pulled from
+# Ultralytics' model zoo and auto-download to BASE_DIR on first use.
+# YOLO11 is Ultralytics' newer generation and detects more accurately than
+# YOLOv8 at a given size; the v8 entries are kept for anyone who wants the
+# smaller/faster/already-cached weights.
+DETECTION_MODEL_CHOICES = {
+    "yolov8n.pt": "YOLOv8 Nano — fastest, least accurate",
+    "yolov8m.pt": "YOLOv8 Medium",
+    "yolo11s.pt": "YOLO11 Small",
+    "yolo11m.pt": "YOLO11 Medium — recommended",
+    "yolo11x.pt": "YOLO11 Extra Large — most accurate, slowest",
+}
+DEFAULT_DETECTION_MODEL = "yolo11m.pt"
+YOLO_MODEL = str(BASE_DIR / DEFAULT_DETECTION_MODEL)
 DETECTION_CONFIDENCE = 0.4
 DETECTION_FRAME_SKIP = 3
 DETECTION_IMGSZ = 480

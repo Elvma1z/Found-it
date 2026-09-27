@@ -15,6 +15,7 @@ def load_app_settings() -> AppSettings:
         return AppSettings(
             detection_confidence=data.get("detection_confidence", defaults.detection_confidence),
             detection_frame_skip=data.get("detection_frame_skip", defaults.detection_frame_skip),
+            detection_model=data.get("detection_model", defaults.detection_model),
             dewarp_default=data.get("dewarp_default", defaults.dewarp_default),
             active_room_id=data.get("active_room_id", defaults.active_room_id),
             room_tracker_layout=data.get("room_tracker_layout", defaults.room_tracker_layout),
@@ -34,6 +35,7 @@ def save_app_settings(settings: AppSettings):
     data = {
         "detection_confidence": settings.detection_confidence,
         "detection_frame_skip": settings.detection_frame_skip,
+        "detection_model": settings.detection_model,
         "dewarp_default": settings.dewarp_default,
         "active_room_id": settings.active_room_id,
         "room_tracker_layout": settings.room_tracker_layout,

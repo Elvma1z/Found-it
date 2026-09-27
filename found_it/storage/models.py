@@ -2,7 +2,9 @@
 from datetime import datetime
 from typing import Optional
 
-from found_it.config import DETECTION_CONFIDENCE, DETECTION_FRAME_SKIP, DEWARP_ENABLED
+from found_it.config import (
+    DEFAULT_DETECTION_MODEL, DETECTION_CONFIDENCE, DETECTION_FRAME_SKIP, DEWARP_ENABLED,
+)
 
 
 @dataclass
@@ -54,12 +56,13 @@ class RoomConfig:
 class AppSettings:
     detection_confidence: float = DETECTION_CONFIDENCE
     detection_frame_skip: int = DETECTION_FRAME_SKIP
+    detection_model: str = DEFAULT_DETECTION_MODEL
     dewarp_default: bool = DEWARP_ENABLED
     active_room_id: str = "main"
     room_tracker_layout: str = ""
     room_setup_layout: str = ""
     font_family: str = "Segoe UI"
-    theme: str = "Indigo"
+    theme: str = "Blue"
     title_hotkey_action: str = "none"
     title_hotkey_label: str = ""
     nav_tab_order: str = ""

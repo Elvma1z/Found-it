@@ -3,20 +3,32 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional
 
-from found_it.config import YOLO_MODEL, DETECTION_CONFIDENCE, DETECTION_IMGSZ, SNAPSHOTS_DIR
+from found_it.config import (
+    BASE_DIR, DEFAULT_DETECTION_MODEL, DETECTION_CONFIDENCE, DETECTION_IMGSZ, SNAPSHOTS_DIR,
+)
 
 
 class ItemDetector:
-    def __init__(self):
+    def __init__(self, model_name: str = DEFAULT_DETECTION_MODEL):
         self.model = None
+        self.model_name = model_name
         self.device = "cpu"
         self.half = False
         self._load_model()
 
+    def set_model(self, model_name: str):
+        """Swap to a different weight file, e.g. after the user changes the
+        detection model in Settings. Downloads the weights on first use."""
+        if model_name == self.model_name and self.model is not None:
+            return
+        self.model_name = model_name
+        self._load_model()
+
     def _load_model(self):
+        weights_path = str(BASE_DIR / self.model_name)
         try:
             from ultralytics import YOLO
-            self.model = YOLO(YOLO_MODEL)
+            self.model = YOLO(weights_path)
 
             try:
                 import torch
@@ -26,7 +38,7 @@ class ItemDetector:
             except ImportError:
                 pass
 
-            print(f"[Detector] Loaded model: {YOLO_MODEL} (device={self.device}, half={self.half})")
+            print(f"[Detector] Loaded model: {weights_path} (device={self.device}, half={self.half})")
         except ImportError:
             print("[Detector] ultralytics not installed. Run: pip install ultralytics")
         except Exception as e:
